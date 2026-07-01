@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/@ztools-center/ztools-api-types/resource/ztools.schema.json",
-  "name": "ztools-f-provider",
+  "name": "f-provider",
   "title": "ZTools 提供商",
   "description": "OCR + 翻译提供商集合（百度/谷歌/有道/微软翻译、微信 OCR）",
   "author": "kaineooo",
