@@ -82,7 +82,7 @@
       "code": "screen-ocr",
       "explain": "截屏并识别图中文字（自动截屏→OCR）",
       "icon": "logo.png",
-      "platform": ["win32"],
+      "platform": ["win32", "darwin"],
       "cmds": [
         {
           "label": "截图识别文字"
@@ -91,8 +91,15 @@
     }
   ],
   "native": {
-    "downloadUrl": "https://github.com/kaineooo/f-provider/releases/download/v1.0.0/native.zip",
-    "sha256": "",
-    "version": "1.0.0"
+    "win": {
+      "downloadUrl": "https://github.com/kaineooo/f-provider/releases/download/v1.0.0/native-win.zip",
+      "sha256": "",
+      "version": "1.0.0"
+    },
+    "mac": {
+      "downloadUrl": "https://github.com/kaineooo/f-provider/releases/download/v1.0.0/native-mac.zip",
+      "sha256": "",
+      "version": "1.0.0"
+    }
   }
 }

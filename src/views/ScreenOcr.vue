@@ -6,7 +6,7 @@ import OcrImageViewer from '../components/OcrImageViewer.vue'
 import { useNativeEngine } from '../composables/useNativeEngine'
 
 /**
- * 截图识别子页（独立 feature screen-ocr 的全屏视图，仅 Windows）。
+ * 截图识别子页（独立 feature screen-ocr 的全屏视图，Windows / macOS）。
  *
  * 快捷键式流程：进入即自动调 ztools.screenCapture 截屏，截完自动跑微信 OCR。
  * 可视化（canvas 绘图 + 透明文字层悬浮 + 全屏缩放/拖动 + 结果列表）

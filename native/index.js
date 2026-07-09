@@ -21,9 +21,14 @@ for (const p of candidates) {
 
 if (!addon) {
   // Re-throw a friendly error pointing at the build step.
+  const platformHint = process.platform === 'win32'
+    ? '(requires VS Build Tools + Python)'
+    : process.platform === 'darwin'
+    ? '(requires Xcode Command Line Tools)'
+    : '(requires build-essential)';
+
   const hint =
-    'Failed to load wechat_ocr.node. Run `npm run build` in this ' +
-    'directory (requires VS Build Tools + Python).'
+    `Failed to load wechat_ocr.node. Run \`npm run build\` in this directory ${platformHint}.`
   throw loadError ? new Error(hint + '\n' + loadError.message) : new Error(hint)
 }
 

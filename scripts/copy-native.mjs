@@ -1,21 +1,25 @@
-// Post-build: copy the native addon + wco_data into dist/ so the packaged
-// plugin can load wechat_ocr.node and find WeChatOCR.exe + Model at runtime,
-// then produce a distributable native.zip.
+// Post-build: copy the native addon + platform runtime into dist/ so the
+// packaged plugin can load wechat_ocr.node and find its OCR runtime, then
+// produce a per-platform distributable zip.
 //
-// Layout after copy + zip:
+// 产物按平台区分（两条独立流程，各自 CI 产出各自的包）：
+//   - Windows: native-win.zip  (wechat_ocr.node + wco_data/)
+//   - macOS:   native-mac.zip  (wechat_ocr.node + wechat-ocr-mac/{lib,models})
+//
+// Layout after copy + zip（以 mac 为例）:
 //   dist/
 //     native/                        <- 解压版，方便开发调试
 //       index.js
 //       package.json
 //       build/Release/wechat_ocr.node
-//       wco_data/  (mmmojo_64.dll, WeChatOCR.exe, Model/, ...)
-//     native.zip                     <- 分发版（顶层含 native/ 目录，解压即还原）
+//       wechat-ocr-mac/  (libwxocr.dylib, libmmmojo.dylib, models/)
+//     native-mac.zip                 <- 分发版（顶层含 native/ 目录，解压即还原）
 //     preload/services.js   (vite already copied from public/)
 //
-// 设计：插件初始不带 native，用户在前端点击「下载」后下载 native.zip 并解压到
+// 设计：插件初始不带 native，用户在前端点击「下载」后下载对应平台的 zip 并解压到
 // 插件根目录（顶层 native/ 解压后落到 <pluginRoot>/native/）。
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,7 +28,9 @@ const root = resolve(__dirname, '..')
 const nativeDir = join(root, 'native')
 const distDir = join(root, 'dist')
 const distNative = join(distDir, 'native')
-const distZip = join(distDir, 'native.zip')
+const isMac = process.platform === 'darwin'
+const zipName = isMac ? 'native-mac.zip' : 'native-win.zip'
+const distZip = join(distDir, zipName)
 
 if (!existsSync(distDir)) {
   console.warn('[copy-native] dist/ not found, skipping')
@@ -46,10 +52,20 @@ if (existsSync(nodeSrc)) {
   cpSync(nodeSrc, join(distNative, 'build', 'Release', 'wechat_ocr.node'), { force: true })
 }
 
-// The proprietary runtime files (wco_data), if present.
-const wcoSrc = join(nativeDir, 'wco_data')
-if (existsSync(wcoSrc)) {
-  cpSync(wcoSrc, join(distNative, 'wco_data'), { recursive: true, force: true })
+// 复制当前平台的专有运行时（只打对应平台，不混装）。
+if (isMac) {
+  // macOS 微信 OCR 运行时（libwxocr.dylib + libmmmojo.dylib + models），
+  // 由 native/scripts/fetch-mac-vendor.cjs 从 npm 包拉取到 native/wechat-ocr-mac/。
+  const macVendorSrc = join(nativeDir, 'wechat-ocr-mac')
+  if (existsSync(macVendorSrc)) {
+    cpSync(macVendorSrc, join(distNative, 'wechat-ocr-mac'), { recursive: true, force: true })
+  }
+} else {
+  // Windows 专有运行时（wco_data），由 native/scripts/fetch-wco-data.cjs 从 NuGet 拉取。
+  const wcoSrc = join(nativeDir, 'wco_data')
+  if (existsSync(wcoSrc)) {
+    cpSync(wcoSrc, join(distNative, 'wco_data'), { recursive: true, force: true })
+  }
 }
 
 // Sanity check: warn if the addon or runtime files are missing.
@@ -59,39 +75,61 @@ if (!nodeReady) {
   console.warn('[copy-native] WARNING: build/Release/wechat_ocr.node not found.')
   console.warn('             Run `npm run build:native` first.')
 }
-const exe = join(distNative, 'wco_data', 'WeChatOCR.exe')
-let wcoReady = existsSync(exe)
-if (!wcoReady) {
-  console.warn('[copy-native] WARNING: wco_data/WeChatOCR.exe not found.')
-  console.warn('             Run `cd native && npm run build` to auto-fetch wco_data from NuGet.')
+
+// 运行时资源就绪判定：macOS 看 libwxocr.dylib，Windows 看 WeChatOCR.exe。
+let runtimeReady
+if (isMac) {
+  const dylib = join(distNative, 'wechat-ocr-mac', 'lib', 'libwxocr.dylib')
+  runtimeReady = existsSync(dylib)
+  if (!runtimeReady) {
+    console.warn('[copy-native] WARNING: wechat-ocr-mac/lib/libwxocr.dylib not found.')
+    console.warn('             Copy the macOS WeChat OCR runtime into native/wechat-ocr-mac.')
+  }
+} else {
+  const exe = join(distNative, 'wco_data', 'WeChatOCR.exe')
+  runtimeReady = existsSync(exe)
+  if (!runtimeReady) {
+    console.warn('[copy-native] WARNING: wco_data/WeChatOCR.exe not found.')
+    console.warn('             Run `cd native && npm run build` to auto-fetch wco_data from NuGet.')
+  }
 }
 
 console.log('[copy-native] native assets copied to dist/native')
 
-// ── 打包 native.zip（分发版）──────────────────────────────────────────
+// ── 打包分发 zip（native-mac.zip / native-win.zip）─────────────────────
 // zip 顶层包含 native/ 目录，用户下载后解压到插件根目录即可还原结构。
 // native/ 缺关键文件时跳过打包并告警（避免分发残缺包）。
-if (nodeReady && wcoReady) {
+if (nodeReady && runtimeReady) {
   // 清理旧的 zip
   if (existsSync(distZip)) rmSync(distZip, { force: true })
 
-  // Compress-Archive 的 -Path 参数带通配，但 dist/ 下只有 native 一个目录，
-  // 直接传 dist/native 的父目录 + native 会打包成 顶层/native/... 不对。
-  // 正确做法：对 dist/ 执行，-Path 指向 native 子目录（含末尾通配 * 不带顶级），
-  // 但我们需要保留顶级 native/ 目录，所以传 dist\native（目录本身）。
-  const psScript = `Compress-Archive -Path '${distNative.replace(/'/g, "''")}' -DestinationPath '${distZip.replace(/'/g, "''")}' -Force`
-  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
-    encoding: 'utf8',
-    shell: false
-  })
+  let r
+  if (isMac) {
+    // macOS：用系统 zip，在 dist/ 目录内对 native 打包，保留顶层 native/ 目录。
+    // -r 递归、-q 静默、-y 保留符号链接（dylib 可能带 symlink）。
+    r = spawnSync('zip', ['-r', '-q', '-y', zipName, 'native'], {
+      cwd: distDir,
+      encoding: 'utf8',
+      shell: false
+    })
+  } else {
+    // Windows：Compress-Archive 的 -Path 指向 dist\native（目录本身），
+    // 保留顶级 native/ 目录，解压到插件根目录即还原结构。
+    const psScript = `Compress-Archive -Path '${distNative.replace(/'/g, "''")}' -DestinationPath '${distZip.replace(/'/g, "''")}' -Force`
+    r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+      encoding: 'utf8',
+      shell: false
+    })
+  }
+
   if (r.status !== 0 || !existsSync(distZip)) {
-    console.warn('[copy-native] WARNING: 生成 native.zip 失败。')
+    console.warn(`[copy-native] WARNING: 生成 ${zipName} 失败。`)
     if (r.stderr) console.warn('             ' + r.stderr.trim())
     if (r.stdout) console.warn('             ' + r.stdout.trim())
   } else {
     const sizeMB = (statSync(distZip).size / 1024 / 1024).toFixed(1)
-    console.log(`[copy-native] dist/native.zip generated (${sizeMB} MB)`)
+    console.log(`[copy-native] dist/${zipName} generated (${sizeMB} MB)`)
   }
 } else {
-  console.warn('[copy-native] native assets incomplete, skipping native.zip packaging.')
+  console.warn(`[copy-native] native assets incomplete, skipping ${zipName} packaging.`)
 }

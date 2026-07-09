@@ -1,6 +1,8 @@
 node_modules/
 dist/
 
+.DS_Store
+
 # Native OCR build output & dependencies
 native/build/
 native/node_modules/
@@ -18,3 +20,7 @@ native/wco_data/*.xnet
 native/wco_data/RecDict
 native/wco_data/sohu_simp.txt
 native/wco_data/x64.config
+
+# macOS WeChat OCR runtime — never committed. Fetched at build time from the
+# npm package @ztools-center/wechat-ocr-native (native/scripts/fetch-mac-vendor.cjs).
+native/wechat-ocr-mac/

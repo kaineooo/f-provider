@@ -73,19 +73,56 @@ window.services = {
 
   // ─── 微信 OCR（基于 wechat_ocr.node 原生模块）─────────────────────────
   // 原生模块懒加载：首次调用时才 require + init，避免插件加载即拉起
-  // WeChatOCR.exe 子进程。
+  // WeChatOCR.exe 子进程（Windows）。
+  //
+  // 平台差异：
+  //  - Windows: addon.init(dataDir) 拉起 WeChatOCR.exe 子进程；
+  //             addon.ocr(imagePath) 异步返回 { ok, lines }。
+  //  - macOS:   直接加载打包的微信 libwxocr.dylib，无子进程；
+  //             addon.ocrMacWevisionJson({imagePath, wxocrLib, resourcesDir})
+  //             同步返回 JSON 字符串（{ engine, text, lines }）。
   _ocrAddon: null,
   _ocrDataDir() {
     // preload 文件位于 <pluginRoot>/preload/services.js
-    // wco_data 位于 <pluginRoot>/native/wco_data
+    // wco_data 位于 <pluginRoot>/native/wco_data（Windows 运行时）
     return path.join(__dirname, '..', 'native', 'wco_data')
+  },
+  // macOS vendor 目录：<pluginRoot>/native/wechat-ocr-mac/{lib,models}
+  _macVendorPaths() {
+    const root = path.join(__dirname, '..', 'native', 'wechat-ocr-mac')
+    return {
+      wxocrLib: path.join(root, 'lib', 'libwxocr.dylib'),
+      resourcesDir: path.join(root, 'models')
+    }
   },
   _ocrEnsure() {
     if (this._ocrAddon) return this._ocrAddon
     const nativeEntry = path.join(__dirname, '..', 'native', 'index.js')
     this._ocrAddon = require(nativeEntry)
-    this._ocrAddon.init(this._ocrDataDir())
+    // Windows 需要显式 init 拉起子进程；macOS 直接加载动态库，无需 init。
+    if (process.platform === 'win32') {
+      this._ocrAddon.init(this._ocrDataDir())
+    }
     return this._ocrAddon
+  },
+
+  // 统一的单图识别：屏蔽平台差异，返回 { ok, taskId?, lines }。
+  // lines 为带坐标的逐行结果（text/rate/left/top/right/bottom/boxPoints）。
+  async _ocrRun(imagePath) {
+    const addon = this._ocrEnsure()
+    if (process.platform === 'darwin') {
+      // macOS：同步调用，返回 JSON 字符串。
+      const vendor = this._macVendorPaths()
+      const json = addon.ocrMacWevisionJson({
+        imagePath,
+        wxocrLib: vendor.wxocrLib,
+        resourcesDir: vendor.resourcesDir
+      })
+      const parsed = JSON.parse(json)
+      return { ok: true, lines: parsed.lines || [] }
+    }
+    // Windows：异步 Promise，返回 { ok, taskId, lines }。
+    return await addon.ocr(imagePath)
   },
 
   // 把任意 image 输入（本地路径 / data URI / http(s) URL）归一化为本地临时文件路径。
@@ -134,11 +171,10 @@ window.services = {
   // 核心 OCR：image 为 本地路径 / data URI / http(s) URL。
   // 返回 provider 契约结构 { text, blocks?, confidence? }；失败抛错。
   async ocrRecognize(image /*, lang */) {
-    const addon = this._ocrEnsure()
     const tmpFile = await this._ocrMaterialize(image)
     const isTemp = tmpFile !== image
     try {
-      const result = await addon.ocr(tmpFile)
+      const result = await this._ocrRun(tmpFile)
       if (!result.ok) throw new Error(result.error || '微信 OCR 识别失败')
       const lines = result.lines || []
       return {
@@ -157,11 +193,10 @@ window.services = {
 
   // 交互式 feature 使用的版本：返回带坐标的明细结构。
   async ocrImageDetail(image) {
-    const addon = this._ocrEnsure()
     const tmpFile = await this._ocrMaterialize(image)
     const isTemp = tmpFile !== image
     try {
-      const result = await addon.ocr(tmpFile)
+      const result = await this._ocrRun(tmpFile)
       if (!result.ok) return { ok: false, error: result.error }
       return { ok: true, taskId: result.taskId, lines: result.lines || [] }
     } catch (e) {
@@ -173,10 +208,16 @@ window.services = {
     }
   },
 
-  // 释放 OCR 引擎（停止 WeChatOCR.exe 子进程）
+  // 释放 OCR 引擎（Windows 停止 WeChatOCR.exe 子进程；macOS 卸载动态库）
   ocrDispose() {
     if (this._ocrAddon) {
-      try { this._ocrAddon.dispose() } catch (_) {}
+      try {
+        if (process.platform === 'darwin') {
+          if (typeof this._ocrAddon.unload === 'function') this._ocrAddon.unload()
+        } else if (typeof this._ocrAddon.dispose === 'function') {
+          this._ocrAddon.dispose()
+        }
+      } catch (_) {}
       this._ocrAddon = null
     }
   },
@@ -191,13 +232,18 @@ window.services = {
   _nativeDir() {
     return path.join(this._pluginRoot(), 'native')
   },
-  // 读 plugin.json 的 native 配置块（缓存）
+  // 读 plugin.json 的 native 配置块（按平台，缓存）。
+  // plugin.json 的 native 字段按平台分组：{ mac: {downloadUrl,sha256,version}, win: {...} }。
+  // 兼容旧的扁平结构（无分组时整体作为当前平台配置）。
   _nativeConfig() {
     if (this._nativeConfigCache) return this._nativeConfigCache
     try {
       const raw = fs.readFileSync(path.join(this._pluginRoot(), 'plugin.json'), 'utf8')
       const cfg = JSON.parse(raw)
-      this._nativeConfigCache = (cfg && cfg.native) || {}
+      const native = (cfg && cfg.native) || {}
+      const key = process.platform === 'darwin' ? 'mac' : 'win'
+      // 有平台分组则取对应平台；否则回退到扁平结构（向后兼容）。
+      this._nativeConfigCache = native[key] || (native.mac || native.win ? {} : native)
     } catch (_) {
       this._nativeConfigCache = {}
     }
@@ -206,13 +252,33 @@ window.services = {
   _nativeConfigCache: null,
 
   // 检查 native 引擎是否就绪。真值来源 = 关键文件存在与否（不靠 dbStorage 记忆，避免漂移）。
+  // 平台差异：
+  //  - Windows: 需要编译产物 wechat_ocr.node + wco_data/WeChatOCR.exe 子进程。
+  //  - macOS:   需要编译产物 wechat_ocr.node + 打包的 libwxocr.dylib + 模型文件。
   nativeStatus() {
     const dir = this._nativeDir()
     const nodeFile = path.join(dir, 'build', 'Release', 'wechat_ocr.node')
-    const exe = path.join(dir, 'wco_data', 'WeChatOCR.exe')
     const missing = []
     if (!fs.existsSync(nodeFile)) missing.push('build/Release/wechat_ocr.node')
-    if (!fs.existsSync(exe)) missing.push('wco_data/WeChatOCR.exe')
+
+    if (process.platform === 'darwin') {
+      const vendor = this._macVendorPaths()
+      const models = vendor.resourcesDir
+      const checks = [
+        [vendor.wxocrLib, 'wechat-ocr-mac/lib/libwxocr.dylib'],
+        [path.join(dir, 'wechat-ocr-mac', 'lib', 'libmmmojo.dylib'), 'wechat-ocr-mac/lib/libmmmojo.dylib'],
+        [path.join(models, 'text_det_fp16_v1.xnet'), 'wechat-ocr-mac/models/text_det_fp16_v1.xnet'],
+        [path.join(models, 'text_rec_fp16_v2.xnet'), 'wechat-ocr-mac/models/text_rec_fp16_v2.xnet'],
+        [path.join(models, 'charset_zh10798.txt'), 'wechat-ocr-mac/models/charset_zh10798.txt']
+      ]
+      for (const [file, label] of checks) {
+        if (!fs.existsSync(file)) missing.push(label)
+      }
+    } else {
+      const exe = path.join(dir, 'wco_data', 'WeChatOCR.exe')
+      if (!fs.existsSync(exe)) missing.push('wco_data/WeChatOCR.exe')
+    }
+
     return {
       ready: missing.length === 0,
       missing,
@@ -348,9 +414,26 @@ window.services = {
     })
   },
 
-  // 用 PowerShell Expand-Archive 解压 zip 到插件根目录（-Force 幂等覆盖）。
+  // 解压 zip 到插件根目录（幂等覆盖）。
+  //  - Windows: PowerShell Expand-Archive -Force。
+  //  - macOS:   系统 unzip -o（覆盖），并去掉 quarantine，避免 Gatekeeper 阻止 dlopen。
   _extractZip(zipPath, destDir) {
     const { spawnSync } = require('node:child_process')
+    if (process.platform === 'darwin') {
+      const r = spawnSync('unzip', ['-o', '-q', zipPath, '-d', destDir], {
+        encoding: 'utf8',
+        shell: false
+      })
+      if (r.status !== 0) {
+        const detail = (r.stderr || r.stdout || '').toString().trim()
+        throw new Error('解压失败' + (detail ? ': ' + detail : ''))
+      }
+      // 解压出的 dylib 带下载来源的 quarantine 属性时，dlopen 会被 Gatekeeper 拦截。
+      spawnSync('xattr', ['-dr', 'com.apple.quarantine', path.join(destDir, 'native')], {
+        stdio: 'ignore'
+      })
+      return
+    }
     const psScript =
       'Expand-Archive -Path ' +
       "'" + zipPath.replace(/'/g, "''") + "'" +
