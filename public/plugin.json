@@ -58,7 +58,7 @@
         {
           "type": "regex",
           "label": "翻译",
-          "match": "^[\\s\\S]*$",
+          "match": "/^[\\s\\S]*$/",
           "minLength": 1
         }
       ]
@@ -71,7 +71,7 @@
         {
           "type": "regex",
           "label": "代码翻译",
-          "match": "^[\\s\\S]*$",
+          "match": "/^[\\s\\S]*$/",
           "minLength": 1
         }
       ]
