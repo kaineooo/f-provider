@@ -11,6 +11,9 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   base: './',
+  server: {
+    port: 5179
+  },
   build: {
     // dist/ 内含手动放置的 native/（.node 原生模块，运行中的 ZTools 会加载并锁定）
     // 与 preload/，不能被 emptyOutDir 清空，否则构建时会因文件被占用而失败。

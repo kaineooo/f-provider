@@ -1,6 +1,6 @@
 {
   "name": "wechat-ocr-provider",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "基于微信内置 OCR 引擎的离线图片文字识别 ZTools Provider",
   "type": "module",
   "scripts": {
