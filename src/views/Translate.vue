@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ZInput, ZSelect, ZButton, ZSwitch, ZTabs, ZTabPane, useToast } from 'ztools-ui'
 
 /**
@@ -99,6 +99,20 @@ const sourceLang = ref('auto')
 const targetLang = ref('auto') // auto = 走 preload 自动推断（中→英 / 其余→中）
 const sourceText = ref('') // 左侧原文（可编辑）
 const autoTranslate = ref(true) // 自动翻译开关，默认开启
+
+// 原文输入框引用：用于挂载/前台时聚焦 + 全选
+const sourceTextareaRef = ref<HTMLTextAreaElement | null>(null)
+
+/**
+ * 聚焦原文输入框并选中全部文本。
+ * 每次进入（挂载）翻译视图时调用，方便用户直接覆盖输入。
+ */
+function focusAndSelectAll() {
+  const el = sourceTextareaRef.value
+  if (!el) return
+  el.focus()
+  el.select()
+}
 
 const result = ref<{ loading: boolean; text: string; error: string; ms: number }>({
   loading: false,
@@ -225,9 +239,31 @@ watch(
 onMounted(() => {
   refreshProviderStatus()
   provider.value = pickDefaultProvider()
+  // 进入/回到翻译视图时默认聚焦输入框并选中全文，便于直接覆盖输入。
+  // nextTick 确保 DOM（含 v-model 文本）已渲染完成后再 select。
+  nextTick(focusAndSelectAll)
+  // 兜底：窗口被宿主隐藏→恢复（未触发 onPluginEnter、组件未重建）的场景。
+  // Electron 下用 win.hide() 隐藏窗口不会触发 document 的 visibilitychange，
+  // 但会触发 window 的 blur/focus，故监听 window 级 focus：仅当此前确实失焦过
+  // （即窗口曾进入后台）才在恢复时重新聚焦 + 全选，避免页面内交互误触发。
+  window.addEventListener('blur', onWinBlur)
+  window.addEventListener('focus', onWinFocus)
 })
 
+// 记录窗口是否进入过后台。仅当为 true 时，下一次 focus 才视为「从后台恢复」。
+let winWasBlurred = false
+function onWinBlur() {
+  winWasBlurred = true
+}
+function onWinFocus() {
+  if (!winWasBlurred) return
+  winWasBlurred = false
+  nextTick(focusAndSelectAll)
+}
+
 onUnmounted(() => {
+  window.removeEventListener('blur', onWinBlur)
+  window.removeEventListener('focus', onWinFocus)
   if (autoTimer) {
     clearTimeout(autoTimer)
     autoTimer = null
@@ -284,6 +320,7 @@ onUnmounted(() => {
           <span class="tr-col-meta">{{ sourceText.length }} 字</span>
         </div>
         <textarea
+          ref="sourceTextareaRef"
           v-model="sourceText"
           class="tr-textarea"
           placeholder="输入要翻译的文本…"
