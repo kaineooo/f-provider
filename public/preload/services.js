@@ -113,13 +113,12 @@ window.services = {
   //             同步返回 JSON 字符串（{ engine, text, lines }）。
   _ocrAddon: null,
   _ocrDataDir() {
-    // preload 文件位于 <pluginRoot>/preload/services.js
-    // wco_data 位于 <pluginRoot>/native/wco_data（Windows 运行时）
-    return path.join(__dirname, '..', 'native', 'wco_data')
+    // wco_data 位于 native 数据目录下（Windows 运行时 WeChatOCR.exe 子进程）。
+    return path.join(this._nativeDir(), 'wco_data')
   },
-  // macOS vendor 目录：<pluginRoot>/native/wechat-ocr-mac/{lib,models}
+  // macOS vendor 目录：<nativeDir>/wechat-ocr-mac/{lib,models}
   _macVendorPaths() {
-    const root = path.join(__dirname, '..', 'native', 'wechat-ocr-mac')
+    const root = path.join(this._nativeDir(), 'wechat-ocr-mac')
     return {
       wxocrLib: path.join(root, 'lib', 'libwxocr.dylib'),
       resourcesDir: path.join(root, 'models')
@@ -127,7 +126,7 @@ window.services = {
   },
   _ocrEnsure() {
     if (this._ocrAddon) return this._ocrAddon
-    const nativeEntry = path.join(__dirname, '..', 'native', 'index.js')
+    const nativeEntry = path.join(this._nativeDir(), 'index.js')
     this._ocrAddon = require(nativeEntry)
     // Windows 需要显式 init 拉起子进程；macOS 直接加载动态库，无需 init。
     if (process.platform === 'win32') {
@@ -253,14 +252,20 @@ window.services = {
   },
 
   // ─── native 引擎下载/状态管理 ─────────────────────────────────────────
-  // 插件初始不带 native；前端展示下载状态，用户点击下载后下载 native.zip
-  // 并解压到插件根目录（zip 顶层为 native/，解压后落到 <pluginRoot>/native/）。
+  // 插件初始不带 native；前端展示下载状态，用户点击下载后从 npmmirror 拉取
+  // npm 包 @jspatrick/f-provider 的 tgz（内含 dist/native-{win,mac}.zip）：
+  // 先解压到临时目录取出对应平台的 zip，再解压得到 native/，最后拷贝到用户
+  // 数据目录。插件被打包成 asar 后插件目录只读，故 native 落盘于 userData 而非插件目录。
   _pluginRoot() {
-    // preload 文件位于 <pluginRoot>/preload/services.js
+    // preload 文件位于 <pluginRoot>/preload/services.js（asar 内，仅用于读 plugin.json）
     return path.join(__dirname, '..')
   },
+  // native 产物所在的数据根目录（可写；独立于只读的 asar 插件目录）。
+  _nativeDataRoot() {
+    return path.join(window.ztools.getPath('userData'), 'f-provider')
+  },
   _nativeDir() {
-    return path.join(this._pluginRoot(), 'native')
+    return path.join(this._nativeDataRoot(), 'native')
   },
   // 读 plugin.json 的 native 配置块（按平台，缓存）。
   // plugin.json 的 native 字段按平台分组：{ mac: {downloadUrl,sha256,version}, win: {...} }。
@@ -444,7 +449,21 @@ window.services = {
     })
   },
 
-  // 解压 zip 到插件根目录（幂等覆盖）。
+  // 解压 .tgz（gzip tar）到目标目录（幂等覆盖）。
+  // Windows 10 1803+ 与 macOS 均自带 tar（bsdtar），-xzf 一次完成 gunzip + untar。
+  _extractTgz(tgzPath, destDir) {
+    const { spawnSync } = require('node:child_process')
+    const r = spawnSync('tar', ['-xzf', tgzPath, '-C', destDir], {
+      encoding: 'utf8',
+      shell: false
+    })
+    if (r.status !== 0) {
+      const detail = (r.stderr || r.stdout || '').toString().trim()
+      throw new Error('解压 tgz 失败' + (detail ? ': ' + detail : ''))
+    }
+  },
+
+  // 解压 zip 到目标目录（幂等覆盖）。
   //  - Windows: PowerShell Expand-Archive -Force。
   //  - macOS:   系统 unzip -o（覆盖），并去掉 quarantine，避免 Gatekeeper 阻止 dlopen。
   _extractZip(zipPath, destDir) {
@@ -480,38 +499,56 @@ window.services = {
     }
   },
 
-  // 主流程：下载 + 校验 + 解压 + 复检。
+  // 主流程：下载 tgz + 校验 + 解压（临时目录）+ 拷贝到数据目录 + 复检。
   // onProgress({ phase, percent, loaded, total }) -> Promise<{ ok, error? }>
   async nativeDownload(onProgress) {
     const cfg = this._nativeConfig()
     if (!cfg.downloadUrl) {
       return { ok: false, error: '未配置 native 下载地址，请在 plugin.json 中设置 native.downloadUrl' }
     }
-    // 释放可能已加载的旧引擎，避免解压覆盖 .node 后引用悬空。
+    // 释放可能已加载的旧引擎，避免覆盖 .node 后引用悬空。
     if (this._ocrAddon) {
       try { this._ocrAddon.dispose() } catch (_) {}
       this._ocrAddon = null
     }
-    const tmpZip = path.join(os.tmpdir(), `wechat-ocr-native-${Date.now()}.zip`)
+    const tmpTgz = path.join(os.tmpdir(), `f-provider-${Date.now()}.tgz`)
+    const workDir = path.join(os.tmpdir(), `f-provider-extract-${Date.now()}`)
     try {
-      // 下载阶段：先并发竞速选最快的 gh-proxy 镜像（透明，不报进度）。
+      fs.mkdirSync(workDir, { recursive: true })
+
+      // 1) 下载阶段：npmmirror 直连即可（_pickFastestMirror 对非 github 域名原样返回）。
       if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
       const downloadUrl = await this._pickFastestMirror(cfg.downloadUrl)
-      await this._downloadFile(downloadUrl, tmpZip, onProgress)
+      await this._downloadFile(downloadUrl, tmpTgz, onProgress)
 
-      // 可选 sha256 校验
+      // 2) 可选 sha256 校验（对下载到的 tgz）
       if (cfg.sha256) {
-        const sum = await this._sha256File(tmpZip)
+        const sum = await this._sha256File(tmpTgz)
         if (sum.toLowerCase() !== String(cfg.sha256).toLowerCase()) {
           return { ok: false, error: '校验和不匹配，文件可能已损坏' }
         }
       }
 
-      // 解压阶段（zip 顶层为 native/，解压到插件根目录即还原）
+      // 3) 解压 tgz 到临时目录 → package/dist/native-{win,mac}.zip
       if (onProgress) onProgress({ phase: 'extracting', percent: 0, loaded: 0, total: 0 })
-      this._extractZip(tmpZip, this._pluginRoot())
+      this._extractTgz(tmpTgz, workDir)
 
-      // 复检关键文件
+      // 4) 选取当前平台 zip 并解压到临时目录 → 顶层 native/
+      const zipName = process.platform === 'darwin' ? 'native-mac.zip' : 'native-win.zip'
+      const platZip = path.join(workDir, 'package', 'dist', zipName)
+      if (!fs.existsSync(platZip)) {
+        return { ok: false, error: `压缩包内未找到 ${zipName}` }
+      }
+      this._extractZip(platZip, workDir)
+
+      // 5) 拷贝 native/ 到数据目录（先清旧目录，避免残留过期文件）
+      const staged = path.join(workDir, 'native')
+      if (!fs.existsSync(staged)) {
+        return { ok: false, error: '解压完成但未找到 native 目录' }
+      }
+      this._installNative(staged)
+
+      // 6) 复检关键文件
       const status = this.nativeStatus()
       if (!status.ready) {
         return {
@@ -523,8 +560,20 @@ window.services = {
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) }
     } finally {
-      try { fs.unlinkSync(tmpZip) } catch (_) {}
+      try { fs.unlinkSync(tmpTgz) } catch (_) {}
+      try { fs.rmSync(workDir, { recursive: true, force: true }) } catch (_) {}
     }
+  },
+
+  // 把临时目录里解压好的 native/ 整体拷贝到数据目录（覆盖安装）。
+  // cpSync 不传播 macOS quarantine，配合 _extractZip 解压阶段的去隔离，落地目录是干净的。
+  _installNative(stagedNative) {
+    const dest = this._nativeDir()
+    fs.mkdirSync(this._nativeDataRoot(), { recursive: true })
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest, { recursive: true, force: true })
+    }
+    fs.cpSync(stagedNative, dest, { recursive: true, force: true })
   },
 
   // 删除已下载的 native 目录（便于重新下载/释放空间）。

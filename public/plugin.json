@@ -87,15 +87,8 @@
     }
   ],
   "native": {
-    "win": {
-      "downloadUrl": "https://github.com/kaineooo/f-provider/releases/download/v1.0.0/native-win.zip",
-      "sha256": "",
-      "version": "1.0.0"
-    },
-    "mac": {
-      "downloadUrl": "https://github.com/kaineooo/f-provider/releases/download/v1.0.0/native-mac.zip",
-      "sha256": "",
-      "version": "1.0.0"
-    }
+    "downloadUrl": "https://registry.npmmirror.com/@jspatrick/f-provider/-/f-provider-1.0.0.tgz",
+    "sha256": "",
+    "version": "1.0.0"
   }
 }
