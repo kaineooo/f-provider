@@ -4,7 +4,7 @@
   "title": "ZTools 提供商",
   "description": "OCR + 翻译提供商集合（百度/谷歌/有道/微软翻译、微信 OCR）",
   "author": "kaineooo",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "main": "index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",
