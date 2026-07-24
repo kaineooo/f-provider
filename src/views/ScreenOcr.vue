@@ -123,11 +123,14 @@ async function recognize(image: string): Promise<void> {
  * window.__loadScreenOcrResult({ image, lines, isDark }) 注入数据。
  *
  * 窗口大小：依据截图自然尺寸换算为 DIP 后计算，但严格夹在 [最小, 屏幕工作区] 之间，
- * 保证任何系统缩放下都不超屏。窗口为无边框（frame:false），标题栏与关闭按钮在子窗口内实现。
+ * 保证任何系统缩放下都不超屏。窗口使用原生标题栏（frame 默认），关闭/最小化等由系统标题栏提供。
  *
  * 关键：截图 PNG 为物理像素，workAreaSize 与 createBrowserWindow 宽高均为 DIP，
  * 故需 ÷ scaleFactor 换算。不同宿主对 scaleFactor / 物理像素口径不一致，
  * 这里用「图片 DIP 尺寸 vs 剩余可用 DIP」取较小者，确保不溢出。
+ *
+ * 尺寸约束：开窗初始宽高不低于 800×600（保证可用性），但不设 minWidth/minHeight，
+ * 用户可手动把窗口拖到更小（无最小尺寸硬限制）。
  */
 function openResultWindow(image: string, linesData: OcrLine[]): void {
   const imgSize = decodePngSize(image)
@@ -140,9 +143,9 @@ function openResultWindow(image: string, linesData: OcrLine[]): void {
   // scaleFactor：如 1 / 1.25 / 1.5 / 1.9 / 2
   const scaleFactor = display.scaleFactor || 1
 
-  // 固定的非图区开销：右侧结果区 + 自绘标题栏
+  // 固定的非图区开销：右侧结果区（原生标题栏由系统提供，不计入窗口内 DIP 预算）
   const RESULT_PANE_W = 360
-  const TITLEBAR_H = 40
+  const TITLEBAR_H = 0
 
   // 图区可用 DIP（屏幕工作区扣除非图区开销，留 16px 边距）
   const availImgWDip = Math.max(200, screenWDip - RESULT_PANE_W - 16)
@@ -167,9 +170,11 @@ function openResultWindow(image: string, linesData: OcrLine[]): void {
   // 最终再夹一次，绝不超屏
   winW = Math.min(winW, screenWDip)
   winH = Math.min(winH, screenHDip)
+  // 初始尺寸不低于 800×600（仅约束开窗大小；不设 minWidth/minHeight，用户仍可手动拖到更小）
+  winW = Math.max(winW, 800)
+  winH = Math.max(winH, 600)
 
   const isDark = window.ztools.isDarkColors()
-  const logo = window.services.pluginLogoDataUrl()
 
   // 子窗口 URL：打包后为 screen-ocr-result.html（相对插件根）。
   const url = 'screen-ocr-result.html'
@@ -183,12 +188,13 @@ function openResultWindow(image: string, linesData: OcrLine[]): void {
         x: workArea.x + Math.floor((screenWDip - winW) / 2),
         y: workArea.y + Math.floor((screenHDip - winH) / 2),
         resizable: true,
-        frame: false, // 无边框：标题栏与关闭按钮在子窗口内自绘
+        // 使用原生标题栏：标题/关闭/最小化等由系统提供（不再自绘）
         title: '截图识别结果',
+        // 隐藏菜单栏（保留原生标题栏与窗口控件；用户按 Alt 仍可临时唤出菜单）
+        autoHideMenuBar: true,
         // 任务栏/标题栏图标用插件 logo NativeImage（Windows 任务栏认 NativeImage 更可靠）
         icon: window.services.pluginLogoNativeImage() || window.services.pluginLogoPath(),
-        minWidth: 480,
-        minHeight: 320,
+        // 不设 minWidth/minHeight：开窗初始 ≥800×600，但用户可手动拖到更小
         maxWidth: screenWDip,
         maxHeight: screenHDip,
         webPreferences: {
@@ -197,12 +203,12 @@ function openResultWindow(image: string, linesData: OcrLine[]): void {
       },
       () => {
         // 页面加载完成回调：注入识别数据
-        injectData(win, { image, lines: linesData, isDark, logo })
+        injectData(win, { image, lines: linesData, isDark })
       }
     )
     // 兜底：部分实现 callback 不可靠，延后再注入一次（幂等）
     window.setTimeout(
-      () => injectData(win, { image, lines: linesData, isDark, logo }),
+      () => injectData(win, { image, lines: linesData, isDark }),
       800
     )
 
@@ -221,7 +227,7 @@ function openResultWindow(image: string, linesData: OcrLine[]): void {
 /** 把数据注入子窗口：调用其 window.__loadScreenOcrResult。 */
 function injectData(
   win: BrowserWindow.WindowInstance,
-  data: { image: string; lines: OcrLine[]; isDark: boolean; logo?: string }
+  data: { image: string; lines: OcrLine[]; isDark: boolean }
 ): void {
   try {
     // 序列化为安全的 JSON，避免引号/换行破坏 JS 字符串
