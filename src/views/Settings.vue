@@ -2,6 +2,7 @@
 import { onMounted, ref, reactive, computed } from 'vue'
 import { ZInput, ZSelect, ZButton, ZTag, ZModal, useToast } from 'ztools-ui'
 import { useNativeEngine } from '../composables/useNativeEngine'
+import { useLatexEngine } from '../composables/useLatexEngine'
 import ProviderLogo from '../components/ProviderLogo.vue'
 import wechatLogo from '../assets/wechat.png'
 
@@ -62,6 +63,56 @@ async function handleDownload(): Promise<void> {
 
 function handleRemove(): void {
   removeNative()
+}
+
+// ─── LaTeX 公式识别引擎 ────────────────────────────────────────────────
+// 与 OCR 引擎完全独立的下载/状态机：复用 useLatexEngine（结构与 useNativeEngine 一致）。
+// 由于两个 composable 都导出 downloadPercent / downloadLoaded / downloadTotal /
+// isBusy / formatBytes，这里对 LaTeX 的同名状态做别名解构，避免与 OCR 冲突。
+const {
+  latexState,
+  downloadPercent: latexPercent,
+  downloadLoaded: latexLoaded,
+  downloadTotal: latexTotal,
+  latexError,
+  latexVersion,
+  latexMissing,
+  latexReady,
+  isBusy: latexBusy,
+  checkLatex,
+  downloadLatex,
+  removeLatex,
+  formatBytes: latexFormatBytes
+} = useLatexEngine()
+
+// LaTeX 状态映射为 ZTag 类型与文案（与 engineTag 同构）
+function latexTag(): {
+  type: 'success' | 'primary' | 'warning' | 'danger' | 'info'
+  text: string
+} {
+  switch (latexState.value) {
+    case 'ready':
+      return { type: 'success', text: '已安装' }
+    case 'downloading':
+      return { type: 'primary', text: '下载中' }
+    case 'extracting':
+      return { type: 'primary', text: '安装中' }
+    case 'missing':
+      return { type: 'warning', text: '未安装' }
+    case 'error':
+      return { type: 'danger', text: '错误' }
+    default:
+      return { type: 'info', text: '检查中' }
+  }
+}
+
+async function handleLatexDownload(): Promise<void> {
+  const ok = await downloadLatex()
+  if (!ok && latexError.value) error(latexError.value)
+}
+
+function handleLatexRemove(): void {
+  removeLatex()
 }
 
 // ─── 翻译设置 ────────────────────────────────────────────────────────
@@ -179,6 +230,7 @@ function closeModal(): void {
 
 onMounted(() => {
   checkNative()
+  checkLatex()
   loadSettings()
 })
 </script>
@@ -253,6 +305,80 @@ onMounted(() => {
             </template>
             <template v-else>
               <ZButton size="small" disabled>{{ engineTag().text }}…</ZButton>
+            </template>
+          </span>
+        </footer>
+      </section>
+
+      <!-- LaTeX 公式识别引擎卡 -->
+      <section class="card">
+        <header class="card-head">
+          <div class="card-avatar" :class="['s-' + latexState]">
+            <svg
+              class="latex-logo"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path
+                fill="currentColor"
+                d="M5 4h3l2 4-1.5 1.5C9.5 12 11 13.5 13 14.5l1.5-1.5 4 2v3a1 1 0 0 1-1 1c-5 0-12-7-12-12a1 1 0 0 1 1-1Z"
+              />
+            </svg>
+            <span v-if="latexState === 'checking'" class="avatar-spin"></span>
+          </div>
+          <div class="card-title">
+            <span class="title-name">公式识别</span>
+            <ZTag :type="latexTag().type" size="small">{{ latexTag().text }}</ZTag>
+          </div>
+        </header>
+
+        <div class="card-body">
+          <p class="card-desc">
+            本地 ONNX 神经网络引擎，离线识别数学公式为 LaTeX，首次使用需下载。
+          </p>
+
+          <!-- 进度 / 错误：内联在卡片体内，与 OCR 卡保持一致 -->
+          <div v-if="latexState === 'downloading'" class="inline-progress">
+            <div class="progress-bar">
+              <div class="progress-fill" :style="{ width: latexPercent + '%' }"></div>
+            </div>
+            <div class="progress-meta">
+              <span>{{ latexPercent }}%</span>
+              <span>{{ latexFormatBytes(latexLoaded)
+              }}<template v-if="latexTotal"> / {{ latexFormatBytes(latexTotal) }}</template></span>
+            </div>
+          </div>
+          <div v-else-if="latexState === 'extracting'" class="inline-progress">
+            <div class="progress-bar">
+              <div class="progress-fill progress-indeterminate"></div>
+            </div>
+            <div class="progress-meta"><span>正在安装，请稍候</span></div>
+          </div>
+          <div v-else-if="latexState === 'error'" class="inline-error">
+            下载失败：{{ latexError }}
+          </div>
+        </div>
+
+        <footer class="card-foot">
+          <span></span>
+          <span class="foot-actions">
+            <template v-if="latexState === 'missing'">
+              <ZButton type="primary" size="small" :disabled="latexBusy" @click="handleLatexDownload">
+                下载
+              </ZButton>
+            </template>
+            <template v-else-if="latexState === 'error'">
+              <ZButton type="primary" size="small" :disabled="latexBusy" @click="handleLatexDownload">
+                重试
+              </ZButton>
+            </template>
+            <template v-else-if="latexReady">
+              <ZButton size="small" :disabled="latexBusy" @click="handleLatexDownload">重新下载</ZButton>
+              <ZButton size="small" :disabled="latexBusy" @click="handleLatexRemove">删除</ZButton>
+            </template>
+            <template v-else>
+              <ZButton size="small" disabled>{{ latexTag().text }}…</ZButton>
             </template>
           </span>
         </footer>
@@ -492,6 +618,12 @@ code {
   height: 26px;
   object-fit: contain;
   border-radius: 6px;
+}
+
+.latex-logo {
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary, #666);
 }
 
 .card-title {

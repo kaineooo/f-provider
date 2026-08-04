@@ -17,6 +17,11 @@
       "label": "微信 OCR",
       "description": "调用本机微信内置 OCR 引擎，离线识别图片文字"
     },
+    "latex-ocr": {
+      "type": "ocr",
+      "label": "公式识别",
+      "description": "本地 ONNX 神经网络识别图片中的数学公式为 LaTeX（离线，无需密钥）"
+    },
     "baidu": {
       "type": "translation",
       "label": "百度翻译",
@@ -84,11 +89,43 @@
       "cmds": [
         "截图识别文字"
       ]
+    },
+    {
+      "code": "latex-recognize",
+      "explain": "识别图片中的数学公式为 LaTeX（图片/文件入口进入识别；关键词进入管理）",
+      "icon": "logo.png",
+      "cmds": [
+        "公式识别",
+        {
+          "type": "img",
+          "label": "识别图片公式"
+        },
+        {
+          "type": "files",
+          "extensions": ["png", "jpg", "jpeg", "gif", "bmp", "webp"],
+          "maxLength": 1,
+          "label": "识别图片公式"
+        }
+      ]
+    },
+    {
+      "code": "screen-latex",
+      "explain": "截屏并识别图中公式为 LaTeX（自动截屏→识别→KaTeX 预览）",
+      "icon": "logo.png",
+      "platform": ["win32", "darwin"],
+      "cmds": [
+        "截图识别公式"
+      ]
     }
   ],
   "native": {
     "downloadUrl": "https://registry.npmmirror.com/@jspatrick/f-provider/-/f-provider-1.0.0.tgz",
     "sha256": "",
     "version": "1.0.0"
+  },
+  "nativeLatex": {
+    "downloadUrl": "https://registry.npmmirror.com/@jspatrick/f-provider-latex/-/f-provider-latex-1.0.3.tgz",
+    "sha256": "",
+    "version": "1.0.3"
   }
 }

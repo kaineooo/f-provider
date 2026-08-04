@@ -251,6 +251,204 @@ window.services = {
     }
   },
 
+  // ─── LaTeX 公式 OCR（基于 onnxruntime-node + pix2tex ONNX 导出模型）──
+  // 与微信 OCR 引擎完全独立：独立的配置块（plugin.json nativeLatex）、
+  // 独立的落地目录（<userData>/f-provider/latex/）、独立的状态/下载/释放。
+  //
+  // 引擎产物结构：
+  //   latex/
+  //     onnxruntime-node/   （从 npm 复制的完整包，含平台原生二进制）
+  //     models/{encoder,decoder,image_resizer}.onnx + tokenizer.json
+  //
+  // 推理在 preload（Node 侧）完成：lazy require latexOcr.js，
+  // 其内部用 require(path.join(latexDir,'onnxruntime-node')) 加载 ORT。
+  _latexEngine: null, // createLatexOcr 返回的推理器实例
+  _latexDataRoot() {
+    // 与微信 OCR 共用 <userData>/f-provider 数据根，latex 子目录独立
+    return path.join(window.ztools.getPath('userData'), 'f-provider')
+  },
+  _latexDir() {
+    return path.join(this._latexDataRoot(), 'latex')
+  },
+  // 读 plugin.json 的 nativeLatex 配置块（结构与 native 块一致）。
+  _latexConfig() {
+    if (this._latexConfigCache) return this._latexConfigCache
+    try {
+      const raw = fs.readFileSync(path.join(this._pluginRoot(), 'plugin.json'), 'utf8')
+      const cfg = JSON.parse(raw)
+      const native = (cfg && cfg.nativeLatex) || {}
+      const key = process.platform === 'darwin' ? 'mac' : 'win'
+      this._latexConfigCache = native[key] || (native.mac || native.win ? {} : native)
+    } catch (_) {
+      this._latexConfigCache = {}
+    }
+    return this._latexConfigCache
+  },
+  _latexConfigCache: null,
+
+  // 检查 LaTeX 引擎是否就绪。真值来源 = 关键文件存在与否（与 nativeStatus 对齐）。
+  latexStatus() {
+    const dir = this._latexDir()
+    const missing = []
+    // onnxruntime-node：要求能 require（main 入口存在）；平台二进制由其内部解析
+    const ortEntry = path.join(dir, 'onnxruntime-node', 'package.json')
+    if (!fs.existsSync(ortEntry)) missing.push('onnxruntime-node/')
+    // 三个 ONNX 模型 + tokenizer
+    const models = path.join(dir, 'models')
+    const need = ['encoder.onnx', 'decoder.onnx', 'image_resizer.onnx', 'tokenizer.json']
+    for (const f of need) {
+      if (!fs.existsSync(path.join(models, f))) missing.push('models/' + f)
+    }
+    return {
+      ready: missing.length === 0,
+      missing,
+      version: this._latexConfig().version || null
+    }
+  },
+
+  // 释放 LaTeX 引擎（关闭 ONNX Session，释放模型内存）。
+  latexDispose() {
+    if (this._latexEngine) {
+      try { this._latexEngine.dispose() } catch (_) {}
+      this._latexEngine = null
+    }
+  },
+
+  // 懒加载推理器：首次调用才 require latexOcr.js 并 createLatexOcr。
+  _latexEnsure() {
+    if (this._latexEngine) return this._latexEngine
+    const { createLatexOcr } = require(path.join(__dirname, 'latexOcr.js'))
+    this._latexEngine = createLatexOcr(this._latexDir())
+    return this._latexEngine
+  },
+
+  // 把任意 image 输入归一化为本地临时文件路径（复用与 _ocrMaterialize 相同逻辑）。
+  async _latexMaterialize(image) {
+    return this._ocrMaterialize(image)
+  },
+
+  // LaTeX Provider 契约：返回 { text, blocks, confidence }；失败抛错。
+  async latexRecognize(image) {
+    const tmpFile = await this._latexMaterialize(image)
+    const isTemp = tmpFile !== image
+    try {
+      const engine = this._latexEnsure()
+      const { latex } = await engine.recognize(tmpFile)
+      return {
+        text: latex || '',
+        blocks: [latex || ''],
+        confidence: 1
+      }
+    } finally {
+      if (isTemp) {
+        try { fs.unlinkSync(tmpFile) } catch (_) {}
+      }
+    }
+  },
+
+  // 交互式 feature 用：返回 { ok, latex, error? }（不抛错）。
+  async latexRecognizeDetail(image) {
+    const tmpFile = await this._latexMaterialize(image)
+    const isTemp = tmpFile !== image
+    try {
+      const engine = this._latexEnsure()
+      const { latex } = await engine.recognize(tmpFile)
+      return { ok: true, latex: latex || '' }
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) }
+    } finally {
+      if (isTemp) {
+        try { fs.unlinkSync(tmpFile) } catch (_) {}
+      }
+    }
+  },
+
+  // 下载 LaTeX 引擎包并解压到 latex 数据目录（去重布局）。
+  // tgz 内含 package/dist/{models, onnxruntime-node-win, onnxruntime-node-mac}：
+  // models 跨平台共享一份，onnxruntime-node 按平台分目录。解压后按当前平台
+  // 选取 onnxruntime-node 目录，与 models 组装成 latex/ 再拷贝到数据目录。
+  async latexDownload(onProgress) {
+    const cfg = this._latexConfig()
+    if (!cfg.downloadUrl) {
+      return { ok: false, error: '未配置 nativeLatex 下载地址，请在 plugin.json 中设置 nativeLatex.downloadUrl' }
+    }
+    // 释放可能已加载的旧引擎，避免覆盖文件后引用悬空
+    this.latexDispose()
+    const tmpTgz = path.join(os.tmpdir(), `f-provider-latex-${Date.now()}.tgz`)
+    // tgz 解压目录（产出 package/dist/{models,onnxruntime-node-{win,mac}}）
+    const extractDir = path.join(os.tmpdir(), `f-provider-latex-extract-${Date.now()}`)
+    // 装配目录：组装出 latex/{onnxruntime-node, models} 供整体拷贝
+    const stageDir = path.join(os.tmpdir(), `f-provider-latex-stage-${Date.now()}`)
+    try {
+      fs.mkdirSync(extractDir, { recursive: true })
+      fs.mkdirSync(stageDir, { recursive: true })
+      // 1) 下载（github 域名用代理竞速，npmmirror 直连）
+      if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
+      const downloadUrl = await this._pickFastestMirror(cfg.downloadUrl)
+      await this._downloadFile(downloadUrl, tmpTgz, onProgress)
+      // 2) 可选 sha256 校验
+      if (cfg.sha256) {
+        const sum = await this._sha256File(tmpTgz)
+        if (sum.toLowerCase() !== String(cfg.sha256).toLowerCase()) {
+          return { ok: false, error: '校验和不匹配，文件可能已损坏' }
+        }
+      }
+      // 3) 解压 tgz → package/dist/{models, onnxruntime-node-win, onnxruntime-node-mac}
+      if (onProgress) onProgress({ phase: 'extracting', percent: 0, loaded: 0, total: 0 })
+      this._extractTgz(tmpTgz, extractDir)
+      const distRoot = path.join(extractDir, 'package', 'dist')
+      // 4) 选取当前平台的 onnxruntime-node 目录
+      const ortDirName = process.platform === 'darwin' ? 'onnxruntime-node-mac' : 'onnxruntime-node-win'
+      const ortSrc = path.join(distRoot, ortDirName)
+      const modelsSrc = path.join(distRoot, 'models')
+      if (!fs.existsSync(ortSrc)) {
+        return { ok: false, error: `压缩包内未找到 ${ortDirName}/` }
+      }
+      if (!fs.existsSync(modelsSrc)) {
+        return { ok: false, error: '压缩包内未找到 models/' }
+      }
+      // 5) 装配 latex/{onnxruntime-node, models}（去重布局：models 共享一份）
+      const staged = path.join(stageDir, 'latex')
+      fs.mkdirSync(staged, { recursive: true })
+      fs.cpSync(ortSrc, path.join(staged, 'onnxruntime-node'), { recursive: true, force: true })
+      fs.cpSync(modelsSrc, path.join(staged, 'models'), { recursive: true, force: true })
+      this._installLatex(staged)
+      // 6) 复检关键文件
+      const status = this.latexStatus()
+      if (!status.ready) {
+        return { ok: false, error: '解压完成但缺少关键文件: ' + status.missing.join(', ') }
+      }
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) }
+    } finally {
+      try { fs.unlinkSync(tmpTgz) } catch (_) {}
+      try { fs.rmSync(extractDir, { recursive: true, force: true }) } catch (_) {}
+      try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+    }
+  },
+
+  // 把临时目录里解压好的 latex/ 整体拷贝到数据目录（覆盖安装）。
+  _installLatex(stagedLatex) {
+    const dest = this._latexDir()
+    fs.mkdirSync(this._latexDataRoot(), { recursive: true })
+    if (fs.existsSync(dest)) {
+      fs.rmSync(dest, { recursive: true, force: true })
+    }
+    fs.cpSync(stagedLatex, dest, { recursive: true, force: true })
+  },
+
+  // 删除已下载的 LaTeX 引擎目录（便于重新下载/释放空间）。
+  latexRemove() {
+    const dir = this._latexDir()
+    this.latexDispose()
+    if (fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true })
+      return true
+    }
+    return false
+  },
+
   // ─── native 引擎下载/状态管理 ─────────────────────────────────────────
   // 插件初始不带 native；前端展示下载状态，用户点击下载后从 npmmirror 拉取
   // npm 包 @jspatrick/f-provider 的 tgz（内含 dist/native-{win,mac}.zip）：
@@ -932,6 +1130,13 @@ async translateMicrosoft(text, from, to) {
 ztools.registerProvider('ocr', async (input) => {
   const { image } = input || {}
   return await window.services.ocrRecognize(image)
+})
+
+// LaTeX 公式识别 OCR 契约（与 ocr 一致）：input { image } -> { text, blocks, confidence }
+// text 为识别出的 LaTeX 源码；blocks 为单元素数组（整段公式）。
+ztools.registerProvider('latex-ocr', async (input) => {
+  const { image } = input || {}
+  return await window.services.latexRecognize(image)
 })
 
 // 翻译契约（对齐宿主 TranslationInput/Output）：

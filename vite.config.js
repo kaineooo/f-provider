@@ -8,6 +8,7 @@ import vue from '@vitejs/plugin-vue'
 //   - index.html              主窗口（设置/识别/翻译/截图识别触发器）
 //   - screen-ocr-result.html  截图识别结果展示窗口（由 ztools.createBrowserWindow 打开，
 //                             纯展示：左图右文，不带 preload，不调 window.ztools API）
+//   - latex-ocr-result.html   公式识别结果展示窗口（左图右文：LaTeX 源码 + KaTeX 渲染 + 复制）
 export default defineConfig({
   plugins: [vue()],
   base: './',
@@ -22,7 +23,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
-        screenOcrResult: resolve(__dirname, 'screen-ocr-result.html')
+        screenOcrResult: resolve(__dirname, 'screen-ocr-result.html'),
+        latexOcrResult: resolve(__dirname, 'latex-ocr-result.html')
       }
     }
   }

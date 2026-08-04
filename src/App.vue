@@ -4,6 +4,7 @@ import GlobalFeedback from './components/GlobalFeedback.vue'
 import Manage from './Manage/index.vue'
 import CodeTranslate from './views/CodeTranslate.vue'
 import ScreenOcr from './views/ScreenOcr.vue'
+import LatexScreen from './views/LatexScreen.vue'
 
 /**
  * 应用根：按 onPluginEnter 的 action.code 在三个 feature 间分流。
@@ -15,8 +16,11 @@ import ScreenOcr from './views/ScreenOcr.vue'
  */
 const enterAction = ref<any>({})
 
-/** 是否进入截图识别 feature。 */
+/** 是否进入截图识别文字 feature。 */
 const isScreenOcr = computed(() => enterAction.value?.code === 'screen-ocr')
+
+/** 是否进入截图识别公式 feature。 */
+const isLatexScreen = computed(() => enterAction.value?.code === 'screen-latex')
 
 /** 是否进入代码翻译 feature。 */
 const isCodeTranslate = computed(() => enterAction.value?.code === 'code-translate')
@@ -43,10 +47,15 @@ onMounted(() => {
   <!-- 全局反馈组件：ztools-ui 的 Toast / Confirm 需要 -->
   <GlobalFeedback />
 
-  <!-- 截图识别 feature：进入即自动截屏→OCR。:key 保证每次进入重建实例、状态不残留 -->
+  <!-- 截图识别文字 feature：进入即自动截屏→OCR。:key 保证每次进入重建实例、状态不残留 -->
   <ScreenOcr
     v-if="isScreenOcr"
     :key="'screen-ocr-' + (enterAction.code || '')"
+  />
+  <!-- 截图识别公式 feature：进入即自动截屏→LaTeX 识别→结果窗口。 -->
+  <LatexScreen
+    v-else-if="isLatexScreen"
+    :key="'screen-latex-' + (enterAction.code || '')"
   />
   <!-- 代码翻译 feature：全屏候选列表。:key 保证每次进入重建实例、状态不残留 -->
   <CodeTranslate

@@ -4,9 +4,11 @@ import SettingLayout from '../components/SettingLayout.vue'
 import type { NavItem } from '../components/SettingLayout.vue'
 import Settings from '../views/Settings.vue'
 import RecognizeTest from '../views/RecognizeTest.vue'
+import LatexRecognize from '../views/LatexRecognize.vue'
 import Translate from '../views/Translate.vue'
 import TranslateTest from '../views/TranslateTest.vue'
 import { useNativeEngine } from '../composables/useNativeEngine'
+import { useLatexEngine } from '../composables/useLatexEngine'
 
 /**
  * 管理主入口（唯一 feature，跨平台）：设置页式布局。
@@ -28,6 +30,7 @@ const props = defineProps<{
 }>()
 
 const { nativeVersion, checkNative } = useNativeEngine()
+const { latexVersion, checkLatex } = useLatexEngine()
 
 const activeKey = ref('settings')
 
@@ -52,6 +55,12 @@ const items = computed<NavItem[]>(() => [
     component: markRaw(RecognizeTest)
   },
   {
+    key: 'latex',
+    label: '公式',
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><!-- Material Symbol: function --><path fill="currentColor" d="M5 4h3l2 4-1.5 1.5C9.5 12 11 13.5 13 14.5l1.5-1.5 4 2v3a1 1 0 0 1-1 1c-5 0-12-7-12-12a1 1 0 0 1 1-1Z"/></svg>',
+    component: markRaw(LatexRecognize)
+  },
+  {
     key: 'translate',
     label: '翻译',
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><!-- Icon from Material Symbols by Google - https://github.com/google/material-design-icons/blob/master/LICENSE --><path fill="currentColor" d="m12 22l-1-3H4q-.825 0-1.412-.587Q2 17.825 2 17V4q0-.825.588-1.413Q3.175 2 4 2h6l.875 3H20q.875 0 1.438.562Q22 6.125 22 7v13q0 .825-.562 1.413Q20.875 22 20 22Zm-4.85-7.4q1.725 0 2.838-1.112Q11.1 12.375 11.1 10.6q0-.2-.012-.363q-.013-.162-.063-.337h-3.95v1.55H9.3q-.2.7-.763 1.087q-.562.388-1.362.388q-.975 0-1.675-.7c-.7-.7-.7-1.725 0-2.45c.7-.7 1.05-.7 1.675-.7q.45 0 .85.162q.4.163.725.488L9.975 7.55Q9.45 7 8.713 6.7q-.738-.3-1.563-.3q-1.675 0-2.862 1.187Q3.1 8.775 3.1 10.5q0 1.725 1.188 2.912Q5.475 14.6 7.15 14.6Zm6.7.5l.55-.525q-.35-.425-.637-.825q-.288-.4-.563-.85Zm1.25-1.275q.7-.825 1.063-1.575q.362-.75.487-1.175h-3.975l.3 1.05h1q.2.375.475.813q.275.437.65.887ZM13 21h7q.45 0 .725-.288Q21 20.425 21 20V7q0-.45-.275-.725Q20.45 6 20 6h-8.825l1.175 4.05h1.975V9h1.025v1.05H19v1.025h-1.275q-.25.95-.75 1.85q-.5.9-1.175 1.675l2.725 2.675L17.8 18l-2.7-2.7l-.9.925L15 19Z"/></svg>',
@@ -73,8 +82,12 @@ function extractImage(action: any): string {
   return ''
 }
 
-// 根据进入动作切换 tab 并预填内容。
+// 根据 onPluginEnter 进入的 action.code/type 切换 tab 并预填内容。
 // 每次进入递增 enterSeq，配合 <component :key> 重建对应子页，确保状态不残留。
+//   - latex-recognize + img/files：切到「公式」并自动用该图片跑 LaTeX 识别
+//   - 其它 code + img/files：切到「识别」并自动用该图片跑微信 OCR
+//   - regex（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
+//   - text / 其它：保持「设置」tab
 watch(
   () => props.enterAction,
   (action) => {
@@ -84,7 +97,12 @@ watch(
     if (action.type === 'img' || action.type === 'files') {
       const img = extractImage(action)
       if (img) {
-        activeKey.value = 'recognize'
+        // latex-recognize feature → 公式 Tab；其它（含 manage）→ 识别 Tab
+        if (action.code === 'latex-recognize') {
+          activeKey.value = 'latex'
+        } else {
+          activeKey.value = 'recognize'
+        }
         initialImage.value = img
         enterSeq.value++
         return
@@ -104,8 +122,9 @@ watch(
 )
 
 onMounted(() => {
-  // 读取 plugin.json 中的 native 版本号用于侧边栏展示
+  // 读取 plugin.json 中的 native / nativeLatex 版本号用于侧边栏展示
   checkNative()
+  checkLatex()
 })
 </script>
 
@@ -113,7 +132,7 @@ onMounted(() => {
   <SettingLayout
     v-model="activeKey"
     :items="items"
-    :version="nativeVersion || undefined"
+    :version="nativeVersion || latexVersion || undefined"
   >
     <!--
       :key 绑定为「activeKey + enterSeq」：切换 tab 或重新进入插件都会重建组件，
@@ -123,6 +142,11 @@ onMounted(() => {
     <RecognizeTest
       v-else-if="activeKey === 'recognize'"
       :key="'recognize-' + enterSeq"
+      :initial-image="initialImage"
+    />
+    <LatexRecognize
+      v-else-if="activeKey === 'latex'"
+      :key="'latex-' + enterSeq"
       :initial-image="initialImage"
     />
     <Translate
