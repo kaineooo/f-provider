@@ -2,14 +2,13 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 
 /**
- * 截图识别结果展示窗口（由 ztools.createBrowserWindow 打开，纯展示，无边框）。
+ * 截图识别结果展示窗口（由 ztools.createBrowserWindow 打开，纯展示，原生标题栏）。
  *
  * 数据来源：主窗口在「截图 + OCR」完成后，通过
  *   win.webContents.executeJavaScript('window.__loadScreenOcrResult({...})')
  * 把 { image, lines, isDark, scaleFactor } 注入本窗口；本组件接收后渲染。
  *
- * 布局：自绘标题栏（可拖动 + 关闭按钮）+ 左图右文。
- *   - 标题栏：无边框窗口顶部自绘，-webkit-app-region: drag 实现拖动，右上角关闭按钮。
+ * 布局：左图右文（标题栏/关闭按钮由系统原生标题栏提供，本视图不自绘）。
  *   - 左侧（图区）：1:1 展示截图底图（canvas 按原图自然像素绘制，CSS 控制显示尺寸），
  *     上叠透明文字层（按坐标百分比定位，贴合识别位置，与原 ScreenOcr/OcrImageViewer 一致）。
  *     图片可自由拖动 + 滚轮缩放（以鼠标为锚点），按钮放大/缩小/复位/1:1。
@@ -26,8 +25,6 @@ const loading = ref(true)
 const errorText = ref('')
 /** 系统缩放（devicePixelRatio），用于 canvas 1:1 渲染。 */
 const scaleFactor = ref(1)
-/** 插件 logo data URI（标题栏左侧展示）。 */
-const logo = ref('')
 
 function applyTheme(isDark: boolean) {
   const root = document.documentElement
@@ -41,7 +38,6 @@ function loadData(data: {
   loading?: boolean
   error?: string
   scaleFactor?: number
-  logo?: string
 }) {
   if (typeof data.image === 'string') image.value = data.image
   if (Array.isArray(data.lines)) lines.value = data.lines
@@ -51,22 +47,11 @@ function loadData(data: {
   if (typeof data.scaleFactor === 'number' && data.scaleFactor > 0) {
     scaleFactor.value = data.scaleFactor
   }
-  if (typeof data.logo === 'string') logo.value = data.logo
   if (data.image) nextTick(loadImage)
 }
 
 // 主窗口注入入口
 ;(window as any).__loadScreenOcrResult = loadData
-
-// ─── 关闭窗口（无边框窗口自绘关闭按钮） ───────────────────────────────
-// 子窗口内 window.close() 会被 Electron BrowserWindow 响应（关闭该窗口）。
-function closeWindow() {
-  try {
-    window.close()
-  } catch (_) {
-    /* ignore */
-  }
-}
 
 // ─── 复制（子窗口无 window.ztools，走 navigator.clipboard 兜底 + 选中提示） ───
 const copied = ref('')
@@ -375,23 +360,6 @@ onUnmounted(() => {
 
 <template>
   <div class="result-window">
-    <!-- 自绘标题栏（无边框窗口）：图标 + 标题，可拖动 + 右上角关闭按钮 -->
-    <header class="title-bar">
-      <div class="title-left">
-        <img v-if="logo" class="title-logo" :src="logo" alt="" draggable="false" />
-        <span class="title-text">截图识别结果</span>
-      </div>
-      <button
-        type="button"
-        class="close-btn"
-        title="关闭"
-        aria-label="关闭"
-        @click="closeWindow"
-      >
-        ✕
-      </button>
-    </header>
-
     <div class="body">
       <!-- 左侧：图片区（适应窗口展示 + 透明文字层 + 拖动缩放） -->
       <div class="pane pane-image">
@@ -490,72 +458,13 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* 整窗：列布局（标题栏在上，主体在下） */
+/* 整窗：列布局（标题栏由系统原生提供，窗口内仅主体） */
 .result-window {
   display: flex;
   flex-direction: column;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-}
-
-/* ── 自绘标题栏（无边框窗口） ── */
-/* -webkit-app-region: drag 让该区域可拖动窗口；按钮需设 no-drag 才能点击 */
-.title-bar {
-  flex: 0 0 auto;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 8px 0 16px;
-  -webkit-app-region: drag;
-  user-select: none;
-  background: var(--titlebar-bg, rgba(0, 0, 0, 0.04));
-  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.18));
-}
-
-.title-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.title-logo {
-  width: 20px;
-  height: 20px;
-  object-fit: contain;
-  flex-shrink: 0;
-  -webkit-app-region: no-drag;
-  pointer-events: none;
-}
-
-.title-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary, inherit);
-}
-
-.close-btn {
-  -webkit-app-region: no-drag;
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s;
-}
-
-.close-btn:hover {
-  background: rgba(229, 57, 53, 0.85);
-  color: #fff;
 }
 
 /* ── 主体：左右分栏（图片区弹性占满，结果区固定宽度并独立滚动） ── */
