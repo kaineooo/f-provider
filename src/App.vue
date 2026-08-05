@@ -25,7 +25,7 @@ const isLatexScreen = computed(() => enterAction.value?.code === 'screen-latex')
 /** 是否进入代码翻译 feature。 */
 const isCodeTranslate = computed(() => enterAction.value?.code === 'code-translate')
 
-/** 透传给 CodeTranslate 的初始文本（regex 入口选中的文本）。 */
+/** 透传给 CodeTranslate 的初始文本（over 入口选中的文本）。 */
 const codeTranslateText = computed(() => {
   const a = enterAction.value
   return a && a.code === 'code-translate' && typeof a.payload === 'string' ? a.payload : ''

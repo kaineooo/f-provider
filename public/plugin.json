@@ -61,9 +61,8 @@
           "label": "识别图片文字"
         },
         {
-          "type": "regex",
+          "type": "over",
           "label": "翻译",
-          "match": "/^[\\s\\S]*$/",
           "minLength": 1
         }
       ]
@@ -74,9 +73,8 @@
       "icon": "logo.png",
       "cmds": [
         {
-          "type": "regex",
+          "type": "over",
           "label": "代码翻译",
-          "match": "/^[\\s\\S]*$/",
           "minLength": 1
         }
       ]

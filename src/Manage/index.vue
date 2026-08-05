@@ -14,7 +14,7 @@ import { useLatexEngine } from '../composables/useLatexEngine'
  * 管理主入口（唯一 feature，跨平台）：设置页式布局。
  * 根据 onPluginEnter 入参（enterAction.type）自动切换 tab 并预填内容：
  *   - img / files：切到「识别」并自动用该图片跑 OCR（展示原图预览）
- *   - regex（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
+ *   - over（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
  *   - text / 其它：保持「设置」tab
  *
  * 侧边栏导航：
@@ -86,7 +86,7 @@ function extractImage(action: any): string {
 // 每次进入递增 enterSeq，配合 <component :key> 重建对应子页，确保状态不残留。
 //   - latex-recognize + img/files：切到「公式」并自动用该图片跑 LaTeX 识别
 //   - 其它 code + img/files：切到「识别」并自动用该图片跑微信 OCR
-//   - regex（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
+//   - over（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
 //   - text / 其它：保持「设置」tab
 watch(
   () => props.enterAction,
@@ -108,7 +108,7 @@ watch(
         return
       }
     }
-    if (action.type === 'regex' && typeof action.payload === 'string' && action.payload.trim()) {
+    if (action.type === 'over' && typeof action.payload === 'string' && action.payload.trim()) {
       activeKey.value = 'translate'
       initialText.value = action.payload
       enterSeq.value++
