@@ -803,6 +803,88 @@ window.services = {
 
 // 通用 HTTP 请求：支持 JSON / form-urlencoded / 查询参数 / 3xx 跟随。
 // 返回 { status, headers, body }；非 2xx 抛错。
+// 解析系统/环境代理，返回 {host, port} 或 null。结果按协议做缓存（进程级）。
+// 优先级：环境变量 HTTPS_PROXY/HTTP_PROXY/ALL_PROXY > Windows 注册表 ProxyServer。
+// 只在 win32 读注册表；其他平台仅认环境变量。
+_proxyCache: {},
+_resolveHttpProxy(targetProtocol) {
+  if (this._proxyCache[targetProtocol] !== undefined) return this._proxyCache[targetProtocol]
+  const pick = (s) => {
+    if (!s) return null
+    try {
+      const u = new URL(s.includes('://') ? s : 'http://' + s)
+      if (!u.hostname || !u.port) return null
+      return { host: u.hostname, port: parseInt(u.port, 10) }
+    } catch (e) { return null }
+  }
+  let p = null
+  if (targetProtocol === 'https:') {
+    p = pick(process.env.HTTPS_PROXY || process.env.https_proxy)
+    if (!p) p = pick(process.env.ALL_PROXY || process.env.all_proxy)
+  } else {
+    p = pick(process.env.HTTP_PROXY || process.env.http_proxy)
+    if (!p) p = pick(process.env.ALL_PROXY || process.env.all_proxy)
+  }
+  // win32：读注册表 Internet Settings 的 ProxyServer（如 Clash 写入 127.0.0.1:7897）。
+  // 用 spawnSync + 参数数组（shell:false），避免 execSync 经 shell 执行时反斜杠被转义吞掉。
+  if (!p && process.platform === 'win32') {
+    try {
+      const { spawnSync } = require('node:child_process')
+      const regKey = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
+      const r = spawnSync('reg', ['query', regKey], {
+        encoding: 'utf8', timeout: 3000, windowsHide: true
+      })
+      const out = r.stdout || ''
+      const enabled = /ProxyEnable\s+REG_DWORD\s+0x1/i.test(out)
+      const m = /ProxyServer\s+REG_SZ\s+(\S+)/i.exec(out)
+      if (enabled && m) {
+        // ProxyServer 可能是 "host:port" 或 "http=host:port;https=host:port" 形式
+        const raw = m[1].trim()
+        const entries = raw.split(';').map(x => x.trim()).filter(Boolean)
+        let chosen = null
+        for (const e of entries) {
+          const eq = e.indexOf('=')
+          if (eq > 0) {
+            const k = e.slice(0, eq).toLowerCase()
+            if (k === 'https' && targetProtocol === 'https:') { chosen = e.slice(eq + 1); break }
+            if (k === 'http' && targetProtocol !== 'https:') { chosen = e.slice(eq + 1); break }
+          } else {
+            chosen = e // 单一 host:port 形式，http/https 共用
+          }
+        }
+        if (chosen) p = pick(chosen)
+      }
+    } catch (e) { /* 读注册表失败则视为无系统代理 */ }
+  }
+  this._proxyCache[targetProtocol] = p
+  return p
+},
+
+// 通过 HTTP CONNECT 建立到 targetHost:targetPort 的 TLS 隧道，返回底层 socket。
+// 用于让 https.request 走系统代理（Node 的 https 默认不走系统代理，需手动 CONNECT）。
+_tunnelConnect(proxyHost, proxyPort, targetHost, targetPort, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const tunnel = http.request({
+      method: 'CONNECT',
+      host: proxyHost,
+      port: proxyPort,
+      path: targetHost + ':' + targetPort,
+      headers: { Host: targetHost + ':' + targetPort }
+    })
+    tunnel.setTimeout(timeoutMs, () => tunnel.destroy(new Error('代理隧道超时')))
+    tunnel.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy()
+        reject(new Error('代理拒绝 CONNECT: ' + res.statusCode))
+        return
+      }
+      resolve(socket)
+    })
+    tunnel.on('error', reject)
+    tunnel.end()
+  })
+},
+
 async _httpRequest(method, url, opts) {
   opts = opts || {}
   const maxRedirects = opts.maxRedirects == null ? 5 : opts.maxRedirects
@@ -816,40 +898,76 @@ async _httpRequest(method, url, opts) {
     return s ? '?' + s : ''
   }
 
-  const doOnce = (targetUrl) =>
-    new Promise((resolve, reject) => {
-      let parsed
-      try { parsed = new URL(targetUrl) } catch (e) { reject(e); return }
-      const client = parsed.protocol === 'https:' ? https : http
-      const headers = Object.assign({}, opts.headers || {})
-      // 微软等端点会校验 User-Agent，缺省或 Node 默认 UA 会被拒（400 Client Browser Version not supported）。
-      // 这里给一个 Chrome UA 兜底，调用方可显式覆盖。
-      if (!headers['User-Agent'] && !headers['user-agent']) {
-        headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
-      }
-      let bodyBuf = null
+  const doOnce = async (targetUrl) => {
+    let parsed
+    try { parsed = new URL(targetUrl) } catch (e) { throw e }
+    const isHttps = parsed.protocol === 'https:'
+    const client = isHttps ? https : http
+    const headers = Object.assign({}, opts.headers || {})
+    // 微软等端点会校验 User-Agent，缺省或 Node 默认 UA 会被拒（400 Client Browser Version not supported）。
+    // 这里给一个 Chrome UA 兜底，调用方可显式覆盖。
+    if (!headers['User-Agent'] && !headers['user-agent']) {
+      headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+    }
+    let bodyBuf = null
 
-      if (opts.json !== undefined) {
-        bodyBuf = Buffer.from(JSON.stringify(opts.json), 'utf8')
-        headers['Content-Type'] = headers['Content-Type'] || 'application/json'
-        headers['Content-Length'] = bodyBuf.length
-      } else if (opts.form !== undefined) {
-        bodyBuf = Buffer.from(new URLSearchParams(opts.form).toString(), 'utf8')
-        headers['Content-Type'] = headers['Content-Type'] || 'application/x-www-form-urlencoded'
-        headers['Content-Length'] = bodyBuf.length
-      } else if (opts.body !== undefined) {
-        bodyBuf = Buffer.from(String(opts.body), 'utf8')
-        headers['Content-Length'] = bodyBuf.length
-      }
+    if (opts.json !== undefined) {
+      bodyBuf = Buffer.from(JSON.stringify(opts.json), 'utf8')
+      headers['Content-Type'] = headers['Content-Type'] || 'application/json'
+      headers['Content-Length'] = bodyBuf.length
+    } else if (opts.form !== undefined) {
+      bodyBuf = Buffer.from(new URLSearchParams(opts.form).toString(), 'utf8')
+      headers['Content-Type'] = headers['Content-Type'] || 'application/x-www-form-urlencoded'
+      headers['Content-Length'] = bodyBuf.length
+    } else if (opts.body !== undefined) {
+      bodyBuf = Buffer.from(String(opts.body), 'utf8')
+      headers['Content-Length'] = bodyBuf.length
+    }
 
-      const reqPath = parsed.pathname + (parsed.search || buildQS(opts.query))
-      const reqOpts = {
-        method,
-        hostname: parsed.hostname,
-        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-        path: reqPath,
-        headers
+    const reqPath = parsed.pathname + (parsed.search || buildQS(opts.query))
+    const targetPort = parseInt(parsed.port, 10) || (isHttps ? 443 : 80)
+    const proxy = this._resolveHttpProxy(parsed.protocol)
+
+    // HTTPS + 代理：先 CONNECT 建隧道，再把 socket 交给 https.request 做 TLS。
+    // 这是让 Node https 走系统代理（如 Clash 127.0.0.1:7897）的标准方式，
+    // 否则 Node 会直连目标 IP，在国内访问 google/microsoft 等境外端点会超时。
+    let tunneledSocket = null
+    if (isHttps && proxy) {
+      try {
+        tunneledSocket = await this._tunnelConnect(proxy.host, proxy.port, parsed.hostname, targetPort, timeoutMs)
+      } catch (e) {
+        // 隧道失败则回退直连（保留原行为，便于代理临时不可用时仍可访问境内端点）
+        tunneledSocket = null
       }
+    }
+
+    const reqOpts = {
+      method,
+      hostname: parsed.hostname,
+      port: targetPort,
+      path: reqPath,
+      headers
+    }
+    // HTTP + 代理：走绝对 URI 转发（HTTP 代理标准用法）。
+    if (!isHttps && proxy) {
+      reqOpts.hostname = proxy.host
+      reqOpts.port = proxy.port
+      reqOpts.path = parsed.toString() // 绝对 URI
+    }
+    // HTTPS + 代理：在隧道 socket 上发请求；servername 用于 SNI。
+    // 注意：复用 socket 时 Node 不会自动补 Host 头，必须显式设置，
+    // 否则部分代理（如 Clash）会因无法识别目标主机而返回伪造的 404。
+    if (isHttps && tunneledSocket) {
+      reqOpts.socket = tunneledSocket
+      reqOpts.servername = parsed.hostname
+      headers['Host'] = parsed.hostname + (parsed.port ? ':' + parsed.port : '')
+      reqOpts.headers = headers
+      delete reqOpts.hostname
+      delete reqOpts.port
+      delete reqOpts.createConnection
+    }
+
+    return new Promise((resolve, reject) => {
       const req = client.request(reqOpts, (res) => {
         // 3xx 跟随
         if (
@@ -881,6 +999,7 @@ async _httpRequest(method, url, opts) {
       if (bodyBuf) req.write(bodyBuf)
       req.end()
     })
+  }
 
   const ret = await doOnce(url)
   if (ret.status >= 200 && ret.status < 300) return ret
@@ -987,19 +1106,30 @@ async translateBaidu(text, from, to) {
   return { text: out, detectedFrom: from }
 },
 
-// 谷歌翻译：POST googlet.deno.dev/translate，JSON，无凭据
+// 谷歌翻译：免费接口 translate.googleapis.com/translate_a/single（client=gtx，无需凭据）。
+// 必须用 GET：该端点对 POST 请求会返回 404（仅接受 query 传参的 GET）。
+// 该域名为 Google 官方地址，国内无法直连；_httpRequest 已支持自动走系统代理（CONNECT 隧道）。
+// 返回体为嵌套数组：data[0] 是句段列表，每段 [译文, 原文, ...]；data[2] 为检测到的源语言。
 async translateGoogle(text, from, to) {
   if (!to) to = this._resolveDefaultTargetLang(text) // 未指定目标语言时按内容推断（中→英，其余→中）
   const sf = this._mapLang('google', from)
   const st = this._mapLang('google', to)
   if (sf === null) throw new Error('谷歌翻译不支持源语言: ' + from)
   if (st === null) throw new Error('谷歌翻译不支持目标语言: ' + to)
-  const resp = await this._httpRequest('POST', 'https://googlet.deno.dev/translate', {
-    json: { text, source_lang: sf, target_lang: st }
+  const resp = await this._httpRequest('GET', 'https://translate.googleapis.com/translate_a/single', {
+    query: { client: 'gtx', sl: sf, tl: st, dt: 't', q: text }
   })
-  const data = JSON.parse(resp.body)
-  if (typeof data.data !== 'string') throw new Error('谷歌翻译返回异常: ' + resp.body.slice(0, 200))
-  return { text: data.data, detectedFrom: from }
+  let data
+  try {
+    data = JSON.parse(resp.body)
+  } catch (e) {
+    throw new Error('谷歌翻译返回异常: ' + resp.body.slice(0, 200))
+  }
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    throw new Error('谷歌翻译返回异常: ' + resp.body.slice(0, 200))
+  }
+  const out = data[0].map((seg) => (seg && seg[0]) ? seg[0] : '').join('')
+  return { text: out, detectedFrom: from }
 },
 
 // 有道翻译：POST openapi.youdao.com/api，form 表单

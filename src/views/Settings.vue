@@ -493,10 +493,10 @@ onMounted(() => {
           <!-- 谷歌 -->
           <template v-else>
             <p class="field-hint">
-              使用 <code>googlet.deno.dev</code> 免费反代，无需凭据，开箱即用。
+              使用 Google 官方免费接口 <code>translate.googleapis.com</code>，无需凭据。
             </p>
             <p class="field-hint">
-              如端点不可用，翻译测试会报错；可等待恢复或改用其他 provider。
+              该域名为 Google 官方地址，国内网络通常无法直连，需走系统代理；如不可用可改用其他 provider。
             </p>
           </template>
         </div>
