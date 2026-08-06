@@ -6,16 +6,11 @@ const http = require('node:http')
 const crypto = require('node:crypto')
 const { URL } = require('node:url')
 
-// native.zip 下载加速镜像前缀。下载前对它们并发竞速（谁先返回响应头谁胜出），
-// 用选中的镜像走完整下载，规避 GitHub Release 直连慢的问题。
+// GitHub Release 下载加速代理前缀（固定走 v6.gh-proxy.org，不竞速）。
+// 对 github.com 域名的下载 URL 统一套此前缀，规避直连慢的问题；其余域名原样直连。
 // 格式为「前缀 + 完整原始 URL」，如：
-//   https://gh-proxy.org/https://github.com/Particaly/ztools-f-provider/releases/download/v1.0.0/native.zip
-const GH_PROXY_HOSTS = [
-  'https://gh-proxy.org/',
-  'https://v4.gh-proxy.org/',
-  'https://v6.gh-proxy.org/',
-  'https://cdn.gh-proxy.org/'
-]
+//   https://v6.gh-proxy.org/https://github.com/kaineooo/f-provider/releases/download/v1.0.3/latex-models.zip
+const GH_PROXY_PREFIX = 'https://v6.gh-proxy.org/'
 
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -257,7 +252,7 @@ window.services = {
   //
   // 引擎产物结构：
   //   latex/
-  //     onnxruntime-node/   （从 npm 复制的完整包，含平台原生二进制）
+  //     onnxruntime-node/   （来自 GitHub Release 的 latex-ort-{win,mac}.zip，含平台原生二进制）
   //     models/{encoder,decoder,image_resizer}.onnx + tokenizer.json
   //
   // 推理在 preload（Node 侧）完成：lazy require latexOcr.js，
@@ -363,51 +358,82 @@ window.services = {
     }
   },
 
-  // 下载 LaTeX 引擎包并解压到 latex 数据目录（去重布局）。
-  // tgz 内含 package/dist/{models, onnxruntime-node-win, onnxruntime-node-mac}：
-  // models 跨平台共享一份，onnxruntime-node 按平台分目录。解压后按当前平台
-  // 选取 onnxruntime-node 目录，与 models 组装成 latex/ 再拷贝到数据目录。
+  // 下载 LaTeX 引擎并解压到 latex 数据目录（去重布局）。
+  // 直接下载 GitHub Release 上的两个 zip（github 域名经 _applyGhProxy 固定走
+  // v6.gh-proxy.org 加速）：
+  //   - latex-ort-{win,mac}.zip  顶层 onnxruntime-node/（当前平台 ORT，小）
+  //   - latex-models.zip         顶层 models/（共享 ONNX 模型 + tokenizer，~179MB）
+  // 解压后按当前平台选取 onnxruntime-node 目录，与 models 组装成 latex/ 再拷贝到数据目录。
+  // 进度合并：ORT 映射到 0–50%，models 映射到 50–100%，避免第二个文件从 0 跳回。
   async latexDownload(onProgress) {
     const cfg = this._latexConfig()
-    if (!cfg.downloadUrl) {
-      return { ok: false, error: '未配置 nativeLatex 下载地址，请在 plugin.json 中设置 nativeLatex.downloadUrl' }
+    if (!cfg.ortUrl || !cfg.modelsUrl) {
+      return { ok: false, error: '未配置 nativeLatex 下载地址，请在 plugin.json 中设置 nativeLatex.{win,mac}.{ortUrl,modelsUrl}' }
     }
     // 释放可能已加载的旧引擎，避免覆盖文件后引用悬空
     this.latexDispose()
-    const tmpTgz = path.join(os.tmpdir(), `f-provider-latex-${Date.now()}.tgz`)
-    // tgz 解压目录（产出 package/dist/{models,onnxruntime-node-{win,mac}}）
+    const ortZip = path.join(os.tmpdir(), `f-provider-latex-ort-${Date.now()}.zip`)
+    const modelsZip = path.join(os.tmpdir(), `f-provider-latex-models-${Date.now()}.zip`)
+    // 解压目录（产出顶层 onnxruntime-node/ 与 models/）
     const extractDir = path.join(os.tmpdir(), `f-provider-latex-extract-${Date.now()}`)
     // 装配目录：组装出 latex/{onnxruntime-node, models} 供整体拷贝
     const stageDir = path.join(os.tmpdir(), `f-provider-latex-stage-${Date.now()}`)
     try {
       fs.mkdirSync(extractDir, { recursive: true })
       fs.mkdirSync(stageDir, { recursive: true })
-      // 1) 下载（github 域名用代理竞速，npmmirror 直连）
+      // 1) 下载 ORT zip（小，占整体 0–50%）。
       if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
-      const downloadUrl = await this._pickFastestMirror(cfg.downloadUrl)
-      await this._downloadFile(downloadUrl, tmpTgz, onProgress)
-      // 2) 可选 sha256 校验
-      if (cfg.sha256) {
-        const sum = await this._sha256File(tmpTgz)
-        if (sum.toLowerCase() !== String(cfg.sha256).toLowerCase()) {
-          return { ok: false, error: '校验和不匹配，文件可能已损坏' }
+      const ortUrl = this._applyGhProxy(cfg.ortUrl)
+      await this._downloadFile(ortUrl, ortZip, (p) => {
+        if (onProgress && p.phase === 'downloading') {
+          onProgress({
+            phase: 'downloading',
+            loaded: p.loaded,
+            total: p.total,
+            percent: p.total > 0 ? Math.min(50, Math.round((p.loaded / p.total) * 50)) : 0
+          })
+        }
+      })
+      // 可选 sha256 校验（ORT）
+      if (cfg.ortSha256) {
+        const sum = await this._sha256File(ortZip)
+        if (sum.toLowerCase() !== String(cfg.ortSha256).toLowerCase()) {
+          return { ok: false, error: 'ORT 校验和不匹配，文件可能已损坏' }
         }
       }
-      // 3) 解压 tgz → package/dist/{models, onnxruntime-node-win, onnxruntime-node-mac}
+      // 2) 下载 models zip（大，~179MB，占整体 50–100%）。
+      const modelsUrl = this._applyGhProxy(cfg.modelsUrl)
+      await this._downloadFile(modelsUrl, modelsZip, (p) => {
+        if (onProgress && p.phase === 'downloading') {
+          onProgress({
+            phase: 'downloading',
+            loaded: p.loaded,
+            total: p.total,
+            percent: 50 + (p.total > 0 ? Math.min(50, Math.round((p.loaded / p.total) * 50)) : 0)
+          })
+        }
+      })
+      // 可选 sha256 校验（models）
+      if (cfg.modelsSha256) {
+        const sum = await this._sha256File(modelsZip)
+        if (sum.toLowerCase() !== String(cfg.modelsSha256).toLowerCase()) {
+          return { ok: false, error: 'models 校验和不匹配，文件可能已损坏' }
+        }
+      }
+      // 3) 解压 ORT zip → onnxruntime-node/
       if (onProgress) onProgress({ phase: 'extracting', percent: 0, loaded: 0, total: 0 })
-      this._extractTgz(tmpTgz, extractDir)
-      const distRoot = path.join(extractDir, 'package', 'dist')
-      // 4) 选取当前平台的 onnxruntime-node 目录
-      const ortDirName = process.platform === 'darwin' ? 'onnxruntime-node-mac' : 'onnxruntime-node-win'
-      const ortSrc = path.join(distRoot, ortDirName)
-      const modelsSrc = path.join(distRoot, 'models')
+      this._extractZip(ortZip, extractDir)
+      // 4) 解压 models zip → models/
+      this._extractZip(modelsZip, extractDir)
+      // 5) 装配 latex/{onnxruntime-node, models}（去重布局：models 共享一份）
+      const ortSrc = path.join(extractDir, 'onnxruntime-node')
+      const modelsSrc = path.join(extractDir, 'models')
       if (!fs.existsSync(ortSrc)) {
-        return { ok: false, error: `压缩包内未找到 ${ortDirName}/` }
+        return { ok: false, error: '压缩包内未找到 onnxruntime-node/（ORT zip 顶层结构异常）' }
       }
       if (!fs.existsSync(modelsSrc)) {
-        return { ok: false, error: '压缩包内未找到 models/' }
+        return { ok: false, error: '压缩包内未找到 models/（models zip 顶层结构异常）' }
       }
-      // 5) 装配 latex/{onnxruntime-node, models}（去重布局：models 共享一份）
       const staged = path.join(stageDir, 'latex')
       fs.mkdirSync(staged, { recursive: true })
       fs.cpSync(ortSrc, path.join(staged, 'onnxruntime-node'), { recursive: true, force: true })
@@ -422,7 +448,8 @@ window.services = {
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) }
     } finally {
-      try { fs.unlinkSync(tmpTgz) } catch (_) {}
+      try { fs.unlinkSync(ortZip) } catch (_) {}
+      try { fs.unlinkSync(modelsZip) } catch (_) {}
       try { fs.rmSync(extractDir, { recursive: true, force: true }) } catch (_) {}
       try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
     }
@@ -450,10 +477,10 @@ window.services = {
   },
 
   // ─── native 引擎下载/状态管理 ─────────────────────────────────────────
-  // 插件初始不带 native；前端展示下载状态，用户点击下载后从 npmmirror 拉取
-  // npm 包 @jspatrick/f-provider 的 tgz（内含 dist/native-{win,mac}.zip）：
-  // 先解压到临时目录取出对应平台的 zip，再解压得到 native/，最后拷贝到用户
-  // 数据目录。插件被打包成 asar 后插件目录只读，故 native 落盘于 userData 而非插件目录。
+  // 插件初始不带 native；前端展示下载状态，用户点击下载后从 GitHub Release 拉取
+  // 当前平台的 native-{win,mac}.zip（github 域名经 _applyGhProxy 走 v6.gh-proxy.org
+  // 加速），解压得到顶层 native/，再拷贝到用户数据目录。插件被打包成 asar 后插件
+  // 目录只读，故 native 落盘于 userData 而非插件目录。
   _pluginRoot() {
     // preload 文件位于 <pluginRoot>/preload/services.js（asar 内，仅用于读 plugin.json）
     return path.join(__dirname, '..')
@@ -519,66 +546,16 @@ window.services = {
     }
   },
 
-  // 并发竞速选最快的加速镜像。对每个代理前缀拼出完整 URL 并发 GET，谁先返回
-  // 响应头谁胜出（不消费 body，立即 abort 其余）。返回选中的完整 URL。
-  // 全部失败/超时则回退原始 URL（直连兜底，保证永不卡死）。
-  // 仅对 github.com 的 URL 启用代理；其余域名原样返回。
-  _pickFastestMirror(rawUrl) {
-    // 非 github.com URL（或非法 URL）跳过代理。
+  // 对 github.com 域名的下载 URL 固定套上 GH_PROXY_PREFIX 加速前缀；
+  // 其余域名（含非法 URL）原样返回。同步函数。
+  _applyGhProxy(rawUrl) {
     try {
       const u = new URL(rawUrl)
-      if (!/github\.com$/i.test(u.hostname) && u.hostname !== 'github.com') {
-        return Promise.resolve(rawUrl)
+      if (u.hostname === 'github.com') {
+        return GH_PROXY_PREFIX + rawUrl
       }
-    } catch (_) {
-      return Promise.resolve(rawUrl)
-    }
-
-    const TIMEOUT_MS = 8000
-    const candidates = GH_PROXY_HOSTS.map((prefix) => prefix + rawUrl)
-
-    return new Promise((resolve) => {
-      let settled = false          // 是否已选出胜者
-      const reqs = []
-      const timers = []
-
-      const finish = (url) => {
-        if (settled) return
-        settled = true
-        // 立即 abort 其余在途请求，清理定时器。
-        timers.forEach((t) => clearTimeout(t))
-        reqs.forEach((r) => { try { r.destroy() } catch (_) {} })
-        resolve(url)
-      }
-
-      candidates.forEach((url) => {
-        let parsed
-        try { parsed = new URL(url) } catch (_) { return }
-        const req = https.get(parsed, () => {
-          // 收到响应头即定胜负（不论状态码，能握手就算可达）。
-          finish(url)
-        })
-        reqs.push(req)
-        req.on('error', () => {})  // 单个失败不影响其余；最终兜底处理
-        // 超时：到点仍未握手，单独 destroy，等其余或兜底。
-        const timer = setTimeout(() => { try { req.destroy() } catch (_) {} }, TIMEOUT_MS)
-        timers.push(timer)
-      })
-
-      // 所有候选都失败/超时 → 回退原始 URL 直连。
-      Promise.all(
-        reqs.map(
-          (r) =>
-            new Promise((res) => {
-              if (r.destroyed) return res()
-              r.on('close', () => res())
-              r.on('error', () => res())
-            })
-        )
-      ).then(() => {
-        if (!settled) finish(rawUrl)
-      })
-    })
+    } catch (_) {}
+    return rawUrl
   },
 
   // 下载 native.zip 到临时目录，支持 3xx 重定向跟随（兼容 GitHub release 跳 CDN）。
@@ -647,23 +624,10 @@ window.services = {
     })
   },
 
-  // 解压 .tgz（gzip tar）到目标目录（幂等覆盖）。
-  // Windows 10 1803+ 与 macOS 均自带 tar（bsdtar），-xzf 一次完成 gunzip + untar。
-  _extractTgz(tgzPath, destDir) {
-    const { spawnSync } = require('node:child_process')
-    const r = spawnSync('tar', ['-xzf', tgzPath, '-C', destDir], {
-      encoding: 'utf8',
-      shell: false
-    })
-    if (r.status !== 0) {
-      const detail = (r.stderr || r.stdout || '').toString().trim()
-      throw new Error('解压 tgz 失败' + (detail ? ': ' + detail : ''))
-    }
-  },
-
   // 解压 zip 到目标目录（幂等覆盖）。
   //  - Windows: PowerShell Expand-Archive -Force。
-  //  - macOS:   系统 unzip -o（覆盖），并去掉 quarantine，避免 Gatekeeper 阻止 dlopen。
+  //  - macOS:   系统 unzip -o（覆盖），并对整个解压目录递归去 quarantine，
+  //             避免 Gatekeeper 拦截 dlopen（native 的 dylib、latex onnxruntime-node 的 .node 均需此处理）。
   _extractZip(zipPath, destDir) {
     const { spawnSync } = require('node:child_process')
     if (process.platform === 'darwin') {
@@ -675,8 +639,9 @@ window.services = {
         const detail = (r.stderr || r.stdout || '').toString().trim()
         throw new Error('解压失败' + (detail ? ': ' + detail : ''))
       }
-      // 解压出的 dylib 带下载来源的 quarantine 属性时，dlopen 会被 Gatekeeper 拦截。
-      spawnSync('xattr', ['-dr', 'com.apple.quarantine', path.join(destDir, 'native')], {
+      // 解压出的二进制带下载来源的 quarantine 属性时，dlopen 会被 Gatekeeper 拦截。
+      // 对整个 destDir 递归去除，兼容 native/、onnxruntime-node/、models/ 等任意顶层目录。
+      spawnSync('xattr', ['-dr', 'com.apple.quarantine', destDir], {
         stdio: 'ignore'
       })
       return
@@ -697,56 +662,51 @@ window.services = {
     }
   },
 
-  // 主流程：下载 tgz + 校验 + 解压（临时目录）+ 拷贝到数据目录 + 复检。
+  // 主流程：下载平台 native zip + 校验 + 解压（临时目录）+ 拷贝到数据目录 + 复检。
+  // 直接下载 GitHub Release 上的 native-{win,mac}.zip（github 域名经 _applyGhProxy
+  // 固定走 v6.gh-proxy.org 加速），zip 顶层含 native/ 目录，解压即还原结构。
   // onProgress({ phase, percent, loaded, total }) -> Promise<{ ok, error? }>
   async nativeDownload(onProgress) {
     const cfg = this._nativeConfig()
     if (!cfg.downloadUrl) {
-      return { ok: false, error: '未配置 native 下载地址，请在 plugin.json 中设置 native.downloadUrl' }
+      return { ok: false, error: '未配置 native 下载地址，请在 plugin.json 中设置 native.{win,mac}.downloadUrl' }
     }
     // 释放可能已加载的旧引擎，避免覆盖 .node 后引用悬空。
     if (this._ocrAddon) {
       try { this._ocrAddon.dispose() } catch (_) {}
       this._ocrAddon = null
     }
-    const tmpTgz = path.join(os.tmpdir(), `f-provider-${Date.now()}.tgz`)
+    const zipName = process.platform === 'darwin' ? 'native-mac.zip' : 'native-win.zip'
+    const tmpZip = path.join(os.tmpdir(), `f-provider-${zipName}-${Date.now()}.zip`)
     const workDir = path.join(os.tmpdir(), `f-provider-extract-${Date.now()}`)
     try {
       fs.mkdirSync(workDir, { recursive: true })
 
-      // 1) 下载阶段：npmmirror 直连即可（_pickFastestMirror 对非 github 域名原样返回）。
+      // 1) 下载阶段：github.com URL 经 gh-proxy 加速，其余域名直连。
       if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
-      const downloadUrl = await this._pickFastestMirror(cfg.downloadUrl)
-      await this._downloadFile(downloadUrl, tmpTgz, onProgress)
+      const downloadUrl = this._applyGhProxy(cfg.downloadUrl)
+      await this._downloadFile(downloadUrl, tmpZip, onProgress)
 
-      // 2) 可选 sha256 校验（对下载到的 tgz）
+      // 2) 可选 sha256 校验
       if (cfg.sha256) {
-        const sum = await this._sha256File(tmpTgz)
+        const sum = await this._sha256File(tmpZip)
         if (sum.toLowerCase() !== String(cfg.sha256).toLowerCase()) {
           return { ok: false, error: '校验和不匹配，文件可能已损坏' }
         }
       }
 
-      // 3) 解压 tgz 到临时目录 → package/dist/native-{win,mac}.zip
+      // 3) 解压 zip 到临时目录 → 顶层 native/
       if (onProgress) onProgress({ phase: 'extracting', percent: 0, loaded: 0, total: 0 })
-      this._extractTgz(tmpTgz, workDir)
+      this._extractZip(tmpZip, workDir)
 
-      // 4) 选取当前平台 zip 并解压到临时目录 → 顶层 native/
-      const zipName = process.platform === 'darwin' ? 'native-mac.zip' : 'native-win.zip'
-      const platZip = path.join(workDir, 'package', 'dist', zipName)
-      if (!fs.existsSync(platZip)) {
-        return { ok: false, error: `压缩包内未找到 ${zipName}` }
-      }
-      this._extractZip(platZip, workDir)
-
-      // 5) 拷贝 native/ 到数据目录（先清旧目录，避免残留过期文件）
+      // 4) 拷贝 native/ 到数据目录（先清旧目录，避免残留过期文件）
       const staged = path.join(workDir, 'native')
       if (!fs.existsSync(staged)) {
         return { ok: false, error: '解压完成但未找到 native 目录' }
       }
       this._installNative(staged)
 
-      // 6) 复检关键文件
+      // 5) 复检关键文件
       const status = this.nativeStatus()
       if (!status.ready) {
         return {
@@ -758,7 +718,7 @@ window.services = {
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) }
     } finally {
-      try { fs.unlinkSync(tmpTgz) } catch (_) {}
+      try { fs.unlinkSync(tmpZip) } catch (_) {}
       try { fs.rmSync(workDir, { recursive: true, force: true }) } catch (_) {}
     }
   },

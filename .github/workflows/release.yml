@@ -7,10 +7,11 @@
 #   - latex-models.zip         : shared pix2tex ONNX models + tokenizer (Win job only)
 #
 # The LaTeX assets are deduplicated: models are platform-agnostic so they ship
-# once, while onnxruntime-node's native binaries differ per platform. After this
-# workflow, run scripts/pack-latex-tgz.mjs --tag <v> to assemble those three
-# artifacts into the universal npm tgz @jspatrick/f-provider-latex (the plugin's
-# nativeLatex.downloadUrl points at the published tgz on npmmirror).
+# once, while onnxruntime-node's native binaries differ per platform. The plugin
+# runtime now downloads these Release zips directly (GitHub URLs are routed
+# through the v6.gh-proxy.org prefix at runtime); the pack-latex-tgz.mjs /
+# npmmirror tgz path is retained only as a fallback packaging route and is no
+# longer consumed by the plugin.
 #
 # Scope: this workflow ONLY builds & ships the native bits. The frontend plugin
 # is released independently (npm run build) — its plugin.json carries the

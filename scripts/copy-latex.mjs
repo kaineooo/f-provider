@@ -51,6 +51,22 @@ if (!existsSync(ortSrc)) {
   if (existsSync(ortDst)) rmSync(ortDst, { recursive: true, force: true })
   cpSync(ortSrc, ortDst, { recursive: true, force: true })
   console.log('[copy-latex] onnxruntime-node copied to dist/latex/onnxruntime-node')
+
+  // 连带复制 onnxruntime-common:onnxruntime-node 运行时 require 它
+  // (dist/index.js 与 binding.js),不带上解压到 userData 后会报
+  // Cannot find module 'onnxruntime-common'。落点放其内部 node_modules/,
+  // 保持 npm 标准布局,require 解析沿路径向上即命中。common 无依赖不链式。
+  // (adm-zip / global-agent 仅 postinstall 用,运行时不需要,不带。)
+  const commonSrc = join(root, 'node_modules', 'onnxruntime-common')
+  const commonDst = join(ortDst, 'node_modules', 'onnxruntime-common')
+  if (!existsSync(commonSrc)) {
+    console.warn('[copy-latex] WARNING: node_modules/onnxruntime-common not found.')
+    console.warn('             onnxruntime-node 运行时 require 它,缺失会导致识别报错。')
+  } else {
+    mkdirSync(join(ortDst, 'node_modules'), { recursive: true })
+    cpSync(commonSrc, commonDst, { recursive: true, force: true })
+    console.log('[copy-latex] onnxruntime-common copied to dist/latex/onnxruntime-node/node_modules/')
+  }
 }
 
 // 2) 校验 models/（由 fetch-latex-models.cjs 拉取到 dist/latex/models/）
@@ -67,7 +83,10 @@ for (const f of required) {
 if (modelsReady) console.log('[copy-latex] LaTeX OCR models present')
 
 const ortReady = existsSync(join(ortDst, 'package.json'))
-if (!ortReady || !modelsReady) {
+const commonReady = existsSync(join(ortDst, 'node_modules', 'onnxruntime-common', 'package.json'))
+if (!ortReady || !commonReady || !modelsReady) {
+  if (!ortReady) console.warn('[copy-latex] WARNING: onnxruntime-node/package.json not found.')
+  if (!commonReady) console.warn('[copy-latex] WARNING: onnxruntime-node/node_modules/onnxruntime-common/package.json not found.')
   console.warn('[copy-latex] latex assets incomplete, skipping zip packaging.')
   process.exit(0)
 }

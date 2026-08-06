@@ -5,14 +5,16 @@ import { useNativeEngine } from '../composables/useNativeEngine'
 import { useLatexEngine } from '../composables/useLatexEngine'
 
 /**
- * 引擎状态卡片：把 checking/missing/downloading/extracting/error/ready
- * 六个态集中渲染，给「引擎管理」与「识别测试」共用。
+ * 引擎状态卡片:把 checking/missing/downloading/extracting/error/ready
+ * 六个态集中渲染,给「引擎管理」与「识别测试」共用。
  *
- * 通过 engineKind 切换「微信 OCR 引擎」与「LaTeX 公式引擎」两套独立的服务调用，
- * 两引擎落盘与状态完全隔离，互不干扰。
+ * 通过 engineKind 切换「微信 OCR 引擎」与「LaTeX 公式引擎」两套独立的服务调用,
+ * 两引擎落盘与状态完全隔离,互不干扰。
  *
- * 内部自己持有一份引擎 composable（与父组件实例独立，通过 props 控制），用于显示；
- * 下载/删除等动作通过事件上抛，由父组件决定是否联动刷新其它状态。
+ * useNativeEngine/useLatexEngine 已是模块级单例:卡片与父组件(及所有调用方)
+ * 共享同一份进度 ref 与进行中下载 Promise。切换 tab 卸载组件不会丢失下载进度,
+ * 重新挂载仍读到同一份状态;下载进行中时 check 会被跳过,不会被文件存在性检查覆盖。
+ * 下载/删除等动作通过事件上抛,由父组件决定是否联动刷新其它状态。
  */
 const props = withDefaults(
   defineProps<{
