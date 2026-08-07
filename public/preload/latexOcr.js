@@ -19,6 +19,15 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
+// Electron sandboxed preload 不提供 setImmediate（仅暴露浏览器侧 setTimeout 等），
+// 而 onnxruntime-node/dist/backend.js 在 session.run() 与 createInferenceSessionHandler()
+// 里直接调用全局 setImmediate，把同步 native 调用推到下一 tick。缺失即抛
+// "setImmediate is not defined"。用 setTimeout(0) 等价 polyfill（语义一致：异步执行）。
+// 必须在 require('onnxruntime-node') 之前执行。
+if (typeof globalThis.setImmediate !== 'function') {
+  globalThis.setImmediate = (cb, ...args) => setTimeout(cb, 0, ...args)
+}
+
 // ─── 模型超参（pix2tex config.yaml / RapidLaTeXOCR 默认）─────────────────
 const CFG = {
   maxW: 672,
