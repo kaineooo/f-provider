@@ -33,8 +33,14 @@ const props = withDefaults(
     initialImage?: string;
     /** 初始模式（由父组件根据入口 action.code 决定）。 */
     initialMode?: "text" | "formula";
+    /**
+     * 进入即自动截屏（screen-ocr / screen-latex feature）。
+     * 为 true 时，组件挂载后引擎就绪即自动调系统截图；引擎未就绪则等下载完成后
+     * 由 watcher 触发。截图结果留在本页展示，不再弹独立窗口。
+     */
+    autoCapture?: boolean;
   }>(),
-  { initialImage: "", initialMode: "text" },
+  { initialImage: "", initialMode: "text", autoCapture: false },
 );
 
 /**
@@ -165,13 +171,32 @@ function autoRecognize() {
 /** 截图识别：调系统截图，截完设为图片并自动识别当前模式。 */
 function captureScreen() {
   window.ztools.screenCapture((imgBase64: string) => {
-    if (!imgBase64) return; // 用户取消截屏
+    if (!imgBase64) return; // 用户取消截屏：留在本页，可手动操作
     const dataUri = imgBase64.startsWith("data:")
       ? imgBase64
       : "data:image/png;base64," + imgBase64;
     setImage(dataUri);
     autoRecognize();
   });
+}
+
+/**
+ * 自动截图流程（screen-ocr / screen-latex 入口）专用标志与触发器。
+ * autoCaptureDone：标记本次进入的自动截图已触发过，防止引擎就绪态抖动
+ *   （ready→checking→ready）反复弹出截图框；用户取消截图后也不再自动重弹，
+ *   可手动点「截图识别」按钮重试。
+ */
+const autoCaptureDone = ref(false);
+
+/**
+ * 进入即自动截图：仅当 autoCapture 开启、尚未触发、当前模式引擎已就绪时调一次截图。
+ * 引擎未就绪时跳过，由 nativeReady/latexReady watcher 在下载完成后补触发。
+ */
+function maybeAutoCapture() {
+  if (!props.autoCapture || autoCaptureDone.value) return;
+  if (!engineReady.value) return;
+  autoCaptureDone.value = true;
+  captureScreen();
 }
 
 function resetResults() {
@@ -348,27 +373,23 @@ watch(
 );
 
 // 文字引擎就绪后补识别：覆盖「下载期间选图」与「切到文字模式时引擎仍在下载」两种场景。
-// 仅当当前处于文字模式、图片已就位且尚未识别（未命中缓存）时触发。
+// 另覆盖 autoCapture（screen-ocr 入口）：引擎未就绪时截图被搁置，就绪后自动补截图。
 watch(nativeReady, (ready) => {
-  if (
-    ready &&
-    mode.value === "text" &&
-    recognizeSrc.value &&
-    !ocrDone.value
-  ) {
+  if (!ready || mode.value !== "text") return;
+  if (recognizeSrc.value && !ocrDone.value) {
     nextTick(() => recognizeText());
+  } else if (props.autoCapture && !autoCaptureDone.value) {
+    maybeAutoCapture();
   }
 });
 
-// 公式引擎就绪后补识别：与文字引擎对称。
+// 公式引擎就绪后补识别：与文字引擎对称，含 autoCapture（screen-latex 入口）补截图。
 watch(latexReady, (ready) => {
-  if (
-    ready &&
-    mode.value === "formula" &&
-    recognizeSrc.value &&
-    !latexDone.value
-  ) {
+  if (!ready || mode.value !== "formula") return;
+  if (recognizeSrc.value && !latexDone.value) {
     nextTick(() => recognizeFormula());
+  } else if (props.autoCapture && !autoCaptureDone.value) {
+    maybeAutoCapture();
   }
 });
 
@@ -376,6 +397,9 @@ onMounted(() => {
   window.addEventListener("paste", onPaste);
   checkNative();
   checkLatex();
+  // 截图识别 feature（screen-ocr / screen-latex）进入即自动截屏：
+  // 引擎已就绪则立即截图，否则由上方 nativeReady/latexReady watcher 在就绪后触发。
+  maybeAutoCapture();
 });
 
 onUnmounted(() => {

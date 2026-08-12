@@ -51,8 +51,14 @@ function onRecognizeModeChange(mode: 'text' | 'formula') {
 // 保证「新建 tab、不复用上次状态」的语义。
 const initialImage = ref('')
 const initialText = ref('')
-/** 识别页初始模式：latex-recognize 入口为 formula，其它为 text */
+/** 识别页初始模式：latex-recognize / screen-latex 入口为 formula，其它为 text */
 const initialMode = ref<'text' | 'formula'>('text')
+/**
+ * 进入即自动截屏（screen-ocr / screen-latex feature）。
+ * 仅这两个截图入口置 true，交由 Recognize 在 onMounted / 引擎就绪后自动截图；
+ * 截图结果留在主窗口内展示，不再弹独立窗口。
+ */
+const autoCapture = ref(false)
 // 组件重建 key：每次进入递增，强制 <component> 卸载旧实例、挂载全新实例。
 const enterSeq = ref(0)
 
@@ -87,6 +93,8 @@ function extractImage(action: any): string {
 
 // 根据 onPluginEnter 进入的 action.code/type 切换 tab 并预填内容。
 // 每次进入递增 enterSeq，配合 <component :key> 重建对应子页，确保状态不残留。
+//   - screen-ocr：切到「识别」+ 文字模式 + 进入即自动截屏
+//   - screen-latex：切到「识别」+ 公式模式 + 进入即自动截屏
 //   - latex-recognize + img/files：切到「识别」并自动进入公式模式跑 LaTeX 识别
 //   - 其它 code + img/files：切到「识别」并自动进入文字模式跑微信 OCR
 //   - over（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
@@ -95,9 +103,19 @@ watch(
   () => props.enterAction,
   (action) => {
     if (!action) return
+    // 每次进入先重置预填值（含 autoCapture），避免上次状态残留
     initialImage.value = ''
     initialText.value = ''
     initialMode.value = 'text'
+    autoCapture.value = false
+    // 截图识别 feature：进入「OCR 识别」并自动触发截屏，结果留主窗口内展示
+    if (action.code === 'screen-ocr' || action.code === 'screen-latex') {
+      initialMode.value = action.code === 'screen-latex' ? 'formula' : 'text'
+      activeKey.value = 'recognize'
+      autoCapture.value = true
+      enterSeq.value++
+      return
+    }
     if (action.type === 'img' || action.type === 'files') {
       const img = extractImage(action)
       if (img) {
@@ -146,6 +164,7 @@ onMounted(() => {
       :key="'recognize-' + enterSeq"
       :initial-image="initialImage"
       :initial-mode="initialMode"
+      :auto-capture="autoCapture"
       @mode-change="onRecognizeModeChange"
     />
     <Translate
