@@ -63,6 +63,6 @@ onMounted(() => {
     :key="'code-translate-' + (enterAction.code || '')"
     :initial-text="codeTranslateText"
   />
-  <!-- 管理 feature：设置/识别/翻译/批量测试 -->
+  <!-- 管理 feature：设置/识别/翻译 -->
   <Manage v-else :enter-action="enterAction" />
 </template>

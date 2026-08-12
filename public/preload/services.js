@@ -6,11 +6,18 @@ const http = require('node:http')
 const crypto = require('node:crypto')
 const { URL } = require('node:url')
 
-// GitHub Release 下载加速代理前缀（固定走 v6.gh-proxy.org，不竞速）。
-// 对 github.com 域名的下载 URL 统一套此前缀，规避直连慢的问题；其余域名原样直连。
+// GitHub Release 下载加速镜像列表（竞速选最快）。
+// 对 github.com 域名的下载 URL，并发请求各镜像，谁先返回响应头即胜出，
+// 全部失败/超时则回退原始 URL 直连，保证不卡死。
 // 格式为「前缀 + 完整原始 URL」，如：
 //   https://v6.gh-proxy.org/https://github.com/kaineooo/f-provider/releases/download/v1.0.3/latex-models.zip
-const GH_PROXY_PREFIX = 'https://v6.gh-proxy.org/'
+// 暴露给前端用于「选择加速 host 重试」UI。
+const GH_PROXY_HOSTS = [
+  'https://gh-proxy.org/',
+  'https://v4.gh-proxy.org/',
+  'https://v6.gh-proxy.org/',
+  'https://cdn.gh-proxy.org/'
+]
 
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -365,11 +372,14 @@ window.services = {
   //   - latex-models.zip         顶层 models/（共享 ONNX 模型 + tokenizer，~179MB）
   // 解压后按当前平台选取 onnxruntime-node 目录，与 models 组装成 latex/ 再拷贝到数据目录。
   // 进度合并：ORT 映射到 0–50%，models 映射到 50–100%，避免第二个文件从 0 跳回。
-  async latexDownload(onProgress) {
+  async latexDownload(onProgress, hostIndex) {
     const cfg = this._latexConfig()
     if (!cfg.ortUrl || !cfg.modelsUrl) {
       return { ok: false, error: '未配置 nativeLatex 下载地址，请在 plugin.json 中设置 nativeLatex.{win,mac}.{ortUrl,modelsUrl}' }
     }
+    // 取消信号（latexCancel 置 aborted=true 中断下载）
+    this._latexSignal = { aborted: false }
+    const signal = this._latexSignal
     // 释放可能已加载的旧引擎，避免覆盖文件后引用悬空
     this.latexDispose()
     const ortZip = path.join(os.tmpdir(), `f-provider-latex-ort-${Date.now()}.zip`)
@@ -383,7 +393,7 @@ window.services = {
       fs.mkdirSync(stageDir, { recursive: true })
       // 1) 下载 ORT zip（小，占整体 0–50%）。
       if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
-      const ortUrl = this._applyGhProxy(cfg.ortUrl)
+      const ortUrl = await this._applyGhProxy(cfg.ortUrl, hostIndex, signal)
       await this._downloadFile(ortUrl, ortZip, (p) => {
         if (onProgress && p.phase === 'downloading') {
           onProgress({
@@ -393,7 +403,7 @@ window.services = {
             percent: p.total > 0 ? Math.min(50, Math.round((p.loaded / p.total) * 50)) : 0
           })
         }
-      })
+      }, undefined, signal)
       // 可选 sha256 校验（ORT）
       if (cfg.ortSha256) {
         const sum = await this._sha256File(ortZip)
@@ -402,7 +412,7 @@ window.services = {
         }
       }
       // 2) 下载 models zip（大，~179MB，占整体 50–100%）。
-      const modelsUrl = this._applyGhProxy(cfg.modelsUrl)
+      const modelsUrl = await this._applyGhProxy(cfg.modelsUrl, hostIndex, signal)
       await this._downloadFile(modelsUrl, modelsZip, (p) => {
         if (onProgress && p.phase === 'downloading') {
           onProgress({
@@ -412,7 +422,7 @@ window.services = {
             percent: 50 + (p.total > 0 ? Math.min(50, Math.round((p.loaded / p.total) * 50)) : 0)
           })
         }
-      })
+      }, undefined, signal)
       // 可选 sha256 校验（models）
       if (cfg.modelsSha256) {
         const sum = await this._sha256File(modelsZip)
@@ -446,12 +456,34 @@ window.services = {
       }
       return { ok: true }
     } catch (e) {
-      return { ok: false, error: String(e && e.message ? e.message : e) }
+      const msg = String(e && e.message ? e.message : e)
+      if (signal.aborted || msg === '下载已取消') {
+        return { ok: false, cancelled: true }
+      }
+      return { ok: false, error: msg }
     } finally {
+      this._latexSignal = null
       try { fs.unlinkSync(ortZip) } catch (_) {}
       try { fs.unlinkSync(modelsZip) } catch (_) {}
       try { fs.rmSync(extractDir, { recursive: true, force: true }) } catch (_) {}
       try { fs.rmSync(stageDir, { recursive: true, force: true }) } catch (_) {}
+    }
+  },
+
+  // 取消进行中的 LaTeX 下载（用户点「取消」时调用）。
+  latexCancel() {
+    if (this._latexSignal) {
+      this._latexSignal.aborted = true
+      // 销毁竞速阶段的镜像探测请求，使 _pickFastestMirror 立即回退 → _downloadFile 入口 reject
+      if (Array.isArray(this._latexSignal.raceReqs)) {
+        for (const r of this._latexSignal.raceReqs) {
+          try { r.destroy() } catch (_) {}
+        }
+      }
+      // 带 error 参数 destroy，确保触发 req.on('error', reject)，避免 Promise 悬挂
+      if (this._latexSignal.req) {
+        try { this._latexSignal.req.destroy(new Error('下载已取消')) } catch (_) {}
+      }
     }
   },
 
@@ -546,27 +578,112 @@ window.services = {
     }
   },
 
-  // 对 github.com 域名的下载 URL 固定套上 GH_PROXY_PREFIX 加速前缀；
-  // 其余域名（含非法 URL）原样返回。同步函数。
-  _applyGhProxy(rawUrl) {
+  // 并发竞速选最快的加速镜像（仅对 github.com 域名启用）。
+  // 谁先返回响应头谁胜出，立即销毁其余请求；全部失败/超时回退原始 URL 直连。
+  // 单请求超时 8s。
+  _pickFastestMirror(rawUrl, signal) {
+    // 已取消则直接回退原始 URL（让 _downloadFile 在入口处 reject）
+    if (signal && signal.aborted) return Promise.resolve(rawUrl)
     try {
       const u = new URL(rawUrl)
-      if (u.hostname === 'github.com') {
-        return GH_PROXY_PREFIX + rawUrl
+      if (u.hostname !== 'github.com') return Promise.resolve(rawUrl)
+    } catch (_) {
+      return Promise.resolve(rawUrl)
+    }
+    const TIMEOUT_MS = 8000
+    const candidates = GH_PROXY_HOSTS.map((prefix) => prefix + rawUrl)
+    return new Promise((resolve) => {
+      let settled = false
+      const reqs = []
+      const timers = []
+      const finish = (url) => {
+        if (settled) return
+        settled = true
+        timers.forEach((t) => clearTimeout(t))
+        reqs.forEach((r) => { try { r.destroy() } catch (_) {} })
+        resolve(url)
       }
-    } catch (_) {}
-    return rawUrl
+      candidates.forEach((url) => {
+        let parsed
+        try { parsed = new URL(url) } catch (_) { return }
+        const req = https.get(parsed, () => finish(url))
+        reqs.push(req)
+        req.on('error', () => {})
+        const timer = setTimeout(() => { try { req.destroy() } catch (_) {} }, TIMEOUT_MS)
+        timers.push(timer)
+      })
+      // 注册竞速请求到 signal：取消时可统一 destroy，使 Promise.all 立即 resolve
+      // → finish 回退原始 URL → _downloadFile 在入口检测 aborted 后 reject
+      if (signal) {
+        signal.raceReqs = reqs
+        if (signal.aborted) { finish(rawUrl); return }
+      }
+      Promise.all(
+        reqs.map((r) =>
+          new Promise((res) => {
+            if (r.destroyed) return res()
+            r.on('close', () => res())
+            r.on('error', () => res())
+          })
+        )
+      ).then(() => { if (!settled) finish(rawUrl) })
+    })
+  },
+
+  // 对 github.com 域名的下载 URL 套上加速镜像前缀；其余域名原样返回。
+  //   hostIndex:
+  //     - undefined: 并发竞速，选最快的镜像（默认）。
+  //     - -1:        直连原始 URL（不走加速）。
+  //     - 0..N-1:    指定使用 GH_PROXY_HOSTS[hostIndex]。
+  async _applyGhProxy(rawUrl, hostIndex, signal) {
+    try {
+      const u = new URL(rawUrl)
+      if (u.hostname !== 'github.com') return rawUrl
+    } catch (_) {
+      return rawUrl
+    }
+    if (hostIndex === -1) return rawUrl
+    if (hostIndex != null && hostIndex >= 0 && hostIndex < GH_PROXY_HOSTS.length) {
+      return GH_PROXY_HOSTS[hostIndex] + rawUrl
+    }
+    return this._pickFastestMirror(rawUrl, signal)
+  },
+
+  // 暴露加速 host 列表给前端（用于「选择 host 重试」UI）。
+  ghProxyHosts() {
+    return GH_PROXY_HOSTS.slice()
   },
 
   // 下载 native.zip 到临时目录，支持 3xx 重定向跟随（兼容 GitHub release 跳 CDN）。
   // onProgress({ phase, percent, loaded, total }) 用于上报进度。
-  _downloadFile(url, dest, onProgress, maxRedirects) {
+  // signal: 可选的取消信号对象 { aborted, req }，aborted=true 时立即销毁请求中断下载。
+  _downloadFile(url, dest, onProgress, maxRedirects, signal) {
     maxRedirects = maxRedirects == null ? 5 : maxRedirects
     return new Promise((resolve, reject) => {
+      if (signal && signal.aborted) {
+        reject(new Error('下载已取消'))
+        return
+      }
       let parsed
       try { parsed = new URL(url) } catch (e) { reject(e); return }
       const client = parsed.protocol === 'https:' ? https : http
       const req = client.get(parsed, (res) => {
+        // 注册到 signal：取消时可直接 destroy 当前请求
+        if (signal) {
+          signal.req = req
+          if (signal.aborted) {
+            try { req.destroy() } catch (_) {}
+            reject(new Error('下载已取消'))
+            return
+          }
+        }
+        // 取消检查：响应头到达后也检查一次
+        if (signal && signal.aborted) {
+          try { req.destroy() } catch (_) {}
+          try { fs.unlinkSync(dest) } catch (_) {}
+          reject(new Error('下载已取消'))
+          return
+        }
         // 重定向
         if (
           res.statusCode >= 300 &&
@@ -579,7 +696,7 @@ window.services = {
             return
           }
           const next = new URL(res.headers.location, parsed).toString()
-          this._downloadFile(next, dest, onProgress, maxRedirects - 1)
+          this._downloadFile(next, dest, onProgress, maxRedirects - 1, signal)
             .then(resolve, reject)
           return
         }
@@ -601,6 +718,11 @@ window.services = {
               percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
             })
           }
+        })
+        // 响应流异常（含取消 destroy 触发的 socket 中断）时 reject，避免 Promise 悬挂
+        res.on('error', (err) => {
+          try { file.destroy() } catch (_) {}
+          reject(err)
         })
         res.pipe(file)
         file.on('finish', () => file.close(() => resolve()))
@@ -666,11 +788,14 @@ window.services = {
   // 直接下载 GitHub Release 上的 native-{win,mac}.zip（github 域名经 _applyGhProxy
   // 固定走 v6.gh-proxy.org 加速），zip 顶层含 native/ 目录，解压即还原结构。
   // onProgress({ phase, percent, loaded, total }) -> Promise<{ ok, error? }>
-  async nativeDownload(onProgress) {
+  async nativeDownload(onProgress, hostIndex) {
     const cfg = this._nativeConfig()
     if (!cfg.downloadUrl) {
       return { ok: false, error: '未配置 native 下载地址，请在 plugin.json 中设置 native.{win,mac}.downloadUrl' }
     }
+    // 取消信号（nativeCancel 置 aborted=true 中断下载）
+    this._nativeSignal = { aborted: false }
+    const signal = this._nativeSignal
     // 释放可能已加载的旧引擎，避免覆盖 .node 后引用悬空。
     if (this._ocrAddon) {
       try { this._ocrAddon.dispose() } catch (_) {}
@@ -684,8 +809,8 @@ window.services = {
 
       // 1) 下载阶段：github.com URL 经 gh-proxy 加速，其余域名直连。
       if (onProgress) onProgress({ phase: 'downloading', percent: 0, loaded: 0, total: 0 })
-      const downloadUrl = this._applyGhProxy(cfg.downloadUrl)
-      await this._downloadFile(downloadUrl, tmpZip, onProgress)
+      const downloadUrl = await this._applyGhProxy(cfg.downloadUrl, hostIndex, signal)
+      await this._downloadFile(downloadUrl, tmpZip, onProgress, undefined, signal)
 
       // 2) 可选 sha256 校验
       if (cfg.sha256) {
@@ -716,10 +841,32 @@ window.services = {
       }
       return { ok: true }
     } catch (e) {
-      return { ok: false, error: String(e && e.message ? e.message : e) }
+      const msg = String(e && e.message ? e.message : e)
+      if (signal.aborted || msg === '下载已取消') {
+        return { ok: false, cancelled: true }
+      }
+      return { ok: false, error: msg }
     } finally {
+      this._nativeSignal = null
       try { fs.unlinkSync(tmpZip) } catch (_) {}
       try { fs.rmSync(workDir, { recursive: true, force: true }) } catch (_) {}
+    }
+  },
+
+  // 取消进行中的 native 下载（用户点「取消」时调用）。
+  nativeCancel() {
+    if (this._nativeSignal) {
+      this._nativeSignal.aborted = true
+      // 销毁竞速阶段的镜像探测请求，使 _pickFastestMirror 立即回退 → _downloadFile 入口 reject
+      if (Array.isArray(this._nativeSignal.raceReqs)) {
+        for (const r of this._nativeSignal.raceReqs) {
+          try { r.destroy() } catch (_) {}
+        }
+      }
+      // 带 error 参数 destroy，确保触发 req.on('error', reject)，避免 Promise 悬挂
+      if (this._nativeSignal.req) {
+        try { this._nativeSignal.req.destroy(new Error('下载已取消')) } catch (_) {}
+      }
     }
   },
 

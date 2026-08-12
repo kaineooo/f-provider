@@ -52,7 +52,8 @@ async function checkNative() {
 // 下载并解压 native 引擎。
 // 幂等:若已有进行中的 downloadPromise(下载/解压中),直接返回它,防重复点击
 // 与多组件并发触发。下载进行中的状态写在单例 ref 上,切 tab 也不丢。
-async function downloadNative(): Promise<boolean> {
+// hostIndex: undefined 竞速选最快镜像；-1 直连；0..N-1 指定镜像（用于重试）。
+async function downloadNative(hostIndex?: number): Promise<boolean> {
   if (downloadPromise) return downloadPromise
   nativeState.value = 'downloading'
   downloadPercent.value = 0
@@ -70,10 +71,13 @@ async function downloadNative(): Promise<boolean> {
         } else if (progress.phase === 'extracting') {
           nativeState.value = 'extracting'
         }
-      })
+      }, hostIndex)
       if (result.ok) {
         nativeState.value = 'ready'
         return true
+      } else if (result.cancelled) {
+        nativeState.value = 'missing'
+        return false
       } else {
         nativeState.value = 'error'
         nativeError.value = result.error || '下载失败'
@@ -101,6 +105,14 @@ function removeNative() {
   } catch (_) {}
   nativeState.value = 'missing'
   checkNative()
+}
+
+// 取消进行中的 native 下载（用户点「取消」时调用）。
+// preload 的 nativeDownload 会在 signal.aborted 后 reject，触发上面的 cancelled 分支。
+function cancelNative() {
+  try {
+    window.services.nativeCancel()
+  } catch (_) {}
 }
 
 const nativeReady = computed(() => nativeState.value === 'ready')
@@ -137,6 +149,7 @@ export function useNativeEngine() {
     // actions
     checkNative,
     downloadNative,
+    cancelNative,
     removeNative,
     // utils
     formatBytes

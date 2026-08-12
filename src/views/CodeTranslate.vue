@@ -15,7 +15,7 @@ import { toCandidates, isMostlyAscii, type CaseCandidate } from '../composables/
  *
  * 直接调 window.services.translateXxx（不经宿主 provider 调度），
  * 必须以 .call(window.services, ...) 形式调用，保证方法内 this 指向 services
- * （与 Translate.vue / TranslateTest.vue 保持一致的调用约定）。
+ * （与 Translate.vue 保持一致的调用约定）。
  */
 
 const props = defineProps<{

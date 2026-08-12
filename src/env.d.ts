@@ -85,6 +85,8 @@ declare global {
   interface NativeDownloadResult {
     ok: boolean
     error?: string
+    /** 用户取消下载时为 true。 */
+    cancelled?: boolean
   }
 
   // ─── 翻译 Provider 相关 ───────────────────────────────────────────────
@@ -137,9 +139,21 @@ declare global {
      * 下载 native.zip 并解压到插件根目录。全程通过 onProgress 上报进度。
      * 流程：下载（带重定向）→ 可选 sha256 校验 → PowerShell 解压 → 复检。
      */
-    nativeDownload: (onProgress?: (progress: NativeDownloadProgress) => void) => Promise<NativeDownloadResult>
+    /**
+     * 下载 native.zip 并解压到插件根目录。全程通过 onProgress 上报进度。
+     * 流程：下载（带重定向）→ 可选 sha256 校验 → PowerShell 解压 → 复检。
+     * hostIndex: undefined 竞速选最快镜像；-1 直连；0..N-1 指定镜像。
+     */
+    nativeDownload: (
+      onProgress?: (progress: NativeDownloadProgress) => void,
+      hostIndex?: number
+    ) => Promise<NativeDownloadResult>
     /** 删除已下载的 native 目录（释放旧引擎、便于重新下载）。 */
     nativeRemove: () => boolean
+    /** 取消进行中的 native 下载。 */
+    nativeCancel: () => void
+    /** GitHub 下载加速镜像列表（用于「选择 host 重试」UI）。 */
+    ghProxyHosts: () => string[]
 
     // ─── LaTeX 公式识别（本地 ONNX 引擎）─────────────────────────────────
     /**
@@ -155,10 +169,16 @@ declare global {
     latexStatus: () => LatexEngineStatus
     /**
      * 下载 LaTeX 引擎包并解压到 userData 数据目录。全程通过 onProgress 上报进度。
+     * hostIndex: undefined 竞速选最快镜像；-1 直连；0..N-1 指定镜像。
      */
-    latexDownload: (onProgress?: (progress: NativeDownloadProgress) => void) => Promise<NativeDownloadResult>
+    latexDownload: (
+      onProgress?: (progress: NativeDownloadProgress) => void,
+      hostIndex?: number
+    ) => Promise<NativeDownloadResult>
     /** 删除已下载的 LaTeX 引擎目录。 */
     latexRemove: () => boolean
+    /** 取消进行中的 LaTeX 下载。 */
+    latexCancel: () => void
     /** 释放 LaTeX 引擎（关闭 ONNX Session）。 */
     latexDispose: () => void
 

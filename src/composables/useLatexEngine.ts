@@ -52,7 +52,8 @@ async function checkLatex() {
 // 下载并解压 LaTeX 引擎。
 // 幂等:若已有进行中的 downloadPromise(下载/解压中),直接返回它,防重复点击
 // 与多组件并发触发。下载进行中的状态写在单例 ref 上,切 tab 也不丢。
-async function downloadLatex(): Promise<boolean> {
+// hostIndex: undefined 竞速选最快镜像；-1 直连；0..N-1 指定镜像（用于重试）。
+async function downloadLatex(hostIndex?: number): Promise<boolean> {
   if (downloadPromise) return downloadPromise
   latexState.value = 'downloading'
   downloadPercent.value = 0
@@ -70,10 +71,13 @@ async function downloadLatex(): Promise<boolean> {
         } else if (progress.phase === 'extracting') {
           latexState.value = 'extracting'
         }
-      })
+      }, hostIndex)
       if (result.ok) {
         latexState.value = 'ready'
         return true
+      } else if (result.cancelled) {
+        latexState.value = 'missing'
+        return false
       } else {
         latexState.value = 'error'
         latexError.value = result.error || '下载失败'
@@ -101,6 +105,13 @@ function removeLatex() {
   } catch (_) {}
   latexState.value = 'missing'
   checkLatex()
+}
+
+// 取消进行中的 LaTeX 下载（用户点「取消」时调用）。
+function cancelLatex() {
+  try {
+    window.services.latexCancel()
+  } catch (_) {}
 }
 
 const latexReady = computed(() => latexState.value === 'ready')
@@ -137,6 +148,7 @@ export function useLatexEngine() {
     // actions
     checkLatex,
     downloadLatex,
+    cancelLatex,
     removeLatex,
     // utils
     formatBytes

@@ -8,7 +8,7 @@ import wechatLogo from '../assets/wechat.png'
 
 /**
  * 设置主页（合并原「引擎管理」+「翻译设置」）：统一卡片网格。
- *  - 每张卡片只展示基础信息（头像 / 名称 / 状态 / 简述），尺寸一致，一排 2 张。
+ *  - 每张卡片只展示基础信息（头像 / 名称 / 状态 / 简述），尺寸一致，一排 3 张。
  *  - 引擎卡：状态标签 + 进度/错误内联；操作（下载/重下/删除）集中在卡片底部。
  *  - 翻译服务卡（百度/谷歌/有道/微软）：基础信息 + 「配置」按钮，点击弹出 Modal 改凭据。
  *
@@ -179,7 +179,7 @@ const providers: ProviderMeta[] = [
   {
     key: 'google',
     name: '谷歌翻译',
-    desc: '使用免费反代端点，免授权开箱即用。'
+    desc: '官方免费接口，免授权开箱即用，国内需系统代理。'
   },
   {
     key: 'youdao',
@@ -244,7 +244,7 @@ onMounted(() => {
       </div>
     </header>
 
-    <!-- 卡片网格：引擎 + 翻译服务，统一尺寸，一排 2 张 -->
+    <!-- 卡片网格：引擎 + 翻译服务，统一尺寸，一排 3 张 -->
     <div class="card-grid">
       <!-- OCR 引擎卡 -->
       <section class="card">
@@ -553,10 +553,10 @@ code {
   font-size: 12px;
 }
 
-/* ── 卡片网格：一排 2 张，统一尺寸 ── */
+/* ── 卡片网格：一排 3 张，统一尺寸 ── */
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 14px;
 }
 

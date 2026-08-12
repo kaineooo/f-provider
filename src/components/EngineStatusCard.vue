@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { ZButton } from 'ztools-ui'
+import { computed, ref } from 'vue'
+import { ZButton, ZPopover } from 'ztools-ui'
 import { useNativeEngine } from '../composables/useNativeEngine'
 import { useLatexEngine } from '../composables/useLatexEngine'
 
@@ -44,6 +44,7 @@ const {
   isBusy,
   checkNative,
   downloadNative,
+  cancelNative,
   removeNative,
   formatBytes
 } = useNativeEngine()
@@ -61,6 +62,7 @@ const {
   isBusy: latexIsBusy,
   checkLatex,
   downloadLatex,
+  cancelLatex,
   removeLatex,
   formatBytes: latexFormatBytes
 } = useLatexEngine()
@@ -99,9 +101,23 @@ if (props.engineKind === 'latex') {
   checkNative()
 }
 
-async function handleDownload() {
-  const ok = props.engineKind === 'latex' ? await downloadLatex() : await downloadNative()
+// 加速镜像列表（从 preload 读取，用于「下载」按钮 hover 下拉展示加速点）。
+const proxyHosts = ref<string[]>([])
+try {
+  proxyHosts.value = window.services.ghProxyHosts()
+} catch (_) {}
+
+async function handleDownload(hostIndex?: number) {
+  const ok =
+    props.engineKind === 'latex'
+      ? await downloadLatex(hostIndex)
+      : await downloadNative(hostIndex)
   if (ok) emit('downloaded')
+}
+
+function handleCancel() {
+  if (props.engineKind === 'latex') cancelLatex()
+  else cancelNative()
 }
 
 function handleRemove() {
@@ -140,7 +156,23 @@ defineExpose({
       <div v-if="missing.length" class="card-missing">
         缺失：{{ missing.join('、') }}
       </div>
-      <ZButton type="primary" @click="handleDownload">下载{{ engineLabel }}引擎</ZButton>
+      <ZPopover trigger="hover" placement="bottom" :keep-alive-on-hover="true">
+        <template #trigger>
+          <ZButton type="primary" @click="handleDownload()">下载{{ engineLabel }}引擎</ZButton>
+        </template>
+        <div class="host-menu">
+          <div class="host-item" @click="handleDownload()">自动竞速</div>
+          <div
+            v-for="(_, i) in proxyHosts"
+            :key="i"
+            class="host-item"
+            @click="handleDownload(i)"
+          >
+            加速点{{ i + 1 }}
+          </div>
+          <div class="host-item" @click="handleDownload(-1)">直连 GitHub</div>
+        </div>
+      </ZPopover>
       <div class="card-hint">下载完成后将自动解压并启用</div>
     </template>
 
@@ -153,6 +185,7 @@ defineExpose({
       <div class="progress-text">
         {{ bytes(loaded) }}<span v-if="total"> / {{ bytes(total) }}</span>
       </div>
+      <ZButton size="small" @click="handleCancel">取消</ZButton>
     </template>
 
     <!-- 解压中 -->
@@ -168,7 +201,23 @@ defineExpose({
     <template v-else-if="state === 'error'">
       <div class="error-title">下载失败</div>
       <div class="error-detail">{{ error }}</div>
-      <ZButton type="primary" @click="handleDownload">重试</ZButton>
+      <ZPopover trigger="hover" placement="bottom" :keep-alive-on-hover="true">
+        <template #trigger>
+          <ZButton type="primary" @click="handleDownload()">重试</ZButton>
+        </template>
+        <div class="host-menu">
+          <div class="host-item" @click="handleDownload()">自动竞速</div>
+          <div
+            v-for="(_, i) in proxyHosts"
+            :key="i"
+            class="host-item"
+            @click="handleDownload(i)"
+          >
+            加速点{{ i + 1 }}
+          </div>
+          <div class="host-item" @click="handleDownload(-1)">直连 GitHub</div>
+        </div>
+      </ZPopover>
     </template>
 
     <!-- 就绪 -->
@@ -178,7 +227,23 @@ defineExpose({
         <div class="status-text">{{ engineLabel }}引擎已就绪，可进行识别</div>
       </div>
       <div v-if="showActions" class="ready-actions">
-        <ZButton size="small" :disabled="busy" @click="handleDownload">重新下载</ZButton>
+        <ZPopover trigger="hover" placement="bottom" :keep-alive-on-hover="true" :show="busy ? false : undefined">
+          <template #trigger>
+            <ZButton size="small" :disabled="busy" @click="handleDownload()">重新下载</ZButton>
+          </template>
+          <div class="host-menu">
+            <div class="host-item" @click="handleDownload()">自动竞速</div>
+            <div
+              v-for="(_, i) in proxyHosts"
+              :key="i"
+              class="host-item"
+              @click="handleDownload(i)"
+            >
+              加速点{{ i + 1 }}
+            </div>
+            <div class="host-item" @click="handleDownload(-1)">直连 GitHub</div>
+          </div>
+        </ZPopover>
         <ZButton size="small" :disabled="busy" @click="handleRemove">删除引擎</ZButton>
       </div>
     </template>
@@ -248,6 +313,28 @@ defineExpose({
   color: #e53935;
   max-width: 360px;
   word-break: break-all;
+}
+
+/* ── 加速点选择菜单（ZPopover content，teleport 到 body）── */
+.host-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.host-item {
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: center;
+  border-radius: 6px;
+  color: var(--text-color, inherit);
+  transition: background 0.12s;
+}
+
+.host-item:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
 }
 
 .ready-row {
