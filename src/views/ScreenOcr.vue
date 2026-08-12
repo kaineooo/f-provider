@@ -46,7 +46,7 @@ const showDownloadGuide = computed(
 
 /**
  * 每次进入的入口：重置状态 → 检查引擎 → 就绪则截图，未就绪则展示下载卡。
- * 由 onMounted（首次进入）与 onPluginEnter（每次重新唤醒）统一调用，
+ * 由 App.vue 的 :key（含 enterSeq）在每次进入时重建本组件、触发 onMounted 统一调用，
  * 不再依赖 watch，避免状态翻转竞态导致卡住。
  */
 async function startFlow(): Promise<void> {
@@ -286,11 +286,11 @@ function onDownloaded(): void {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
-  // 每次进入（含「开结果窗口后再次触发快捷键」的重新唤醒）都重置并重新推进
-  window.ztools.onPluginEnter(() => {
-    startFlow()
-  })
-  // 首次进入：onPluginEnter 可能在 onMounted 注册前已触发，故这里显式启动一次
+  // 每次进入都由 App.vue 的 :key（含 enterSeq）重建本组件、触发 onMounted，
+  // 故这里显式启动一次即可覆盖「首次进入」与「同 feature 重复唤醒」两种情形。
+  // ⚠️ 切勿在此注册 window.ztools.onPluginEnter：它是覆盖式 setter（无 off API），
+  // 会顶掉 App.vue 的中央路由回调，导致之后切到其它 feature（如「ZTools 提供商」）
+  // 时 enterAction 不再更新、仍被劫持来截图。
   startFlow()
 })
 

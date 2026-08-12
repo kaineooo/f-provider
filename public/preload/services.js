@@ -10,7 +10,7 @@ const { URL } = require('node:url')
 // 对 github.com 域名的下载 URL，并发请求各镜像，谁先返回响应头即胜出，
 // 全部失败/超时则回退原始 URL 直连，保证不卡死。
 // 格式为「前缀 + 完整原始 URL」，如：
-//   https://v6.gh-proxy.org/https://github.com/kaineooo/f-provider/releases/download/v1.0.3/latex-models.zip
+//   https://v6.gh-proxy.org/https://github.com/kaineooo/f-provider/releases/download/v1.0.4/latex-models.zip
 // 暴露给前端用于「选择加速 host 重试」UI。
 const GH_PROXY_HOSTS = [
   'https://gh-proxy.org/',

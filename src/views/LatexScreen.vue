@@ -208,9 +208,11 @@ function onDownloaded(): void {
 
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
-  window.ztools.onPluginEnter(() => {
-    startFlow()
-  })
+  // 每次进入都由 App.vue 的 :key（含 enterSeq）重建本组件、触发 onMounted，
+  // 故这里显式启动一次即可覆盖「首次进入」与「同 feature 重复唤醒」两种情形。
+  // ⚠️ 切勿在此注册 window.ztools.onPluginEnter：它是覆盖式 setter（无 off API），
+  // 会顶掉 App.vue 的中央路由回调，导致之后切到其它 feature（如「ZTools 提供商」）
+  // 时 enterAction 不再更新、仍被劫持来截图。
   startFlow()
 })
 
