@@ -41,6 +41,16 @@
       "type": "translation",
       "label": "微软翻译",
       "description": "微软 Edge 翻译（免密钥，两种鉴权方案）"
+    },
+    "ai-translation": {
+      "type": "translation",
+      "label": "AI 翻译",
+      "description": "基于大语言模型翻译（复用宿主已配置的 AI 模型，无需密钥）"
+    },
+    "ai-ocr": {
+      "type": "ocr",
+      "label": "AI 识图",
+      "description": "基于视觉模型识别图片文字（需选择支持视觉的模型）"
     }
   },
   "features": [

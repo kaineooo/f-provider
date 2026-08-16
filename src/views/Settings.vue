@@ -120,6 +120,17 @@ const baidu = ref({ appID: '', appKey: '' })
 const youdao = ref({ appKey: '', appSecret: '' })
 const microsoft = ref<{ requestMode: 'edge' | 'signature' }>({ requestMode: 'edge' })
 
+// AI 翻译 / AI OCR：复用宿主已配置的 AI 模型，此处仅存模型选择与 prompt 模板（不存密钥）。
+const aiTranslation = ref({ model: '', systemPrompt: '' })
+const aiOcr = ref({ model: '', systemPrompt: '' })
+// 宿主已配置的 AI 模型列表（ztools.allAiModels()），用于模型下拉。
+const aiModels = ref<{ id: string; label: string }[]>([])
+// 模型下拉选项：未配置模型时只给一个禁用占位，避免误选空值。
+const aiModelOptions = computed(() => {
+  if (!aiModels.value.length) return [{ label: '尚未配置 AI 模型', value: '', disabled: true }]
+  return [{ label: '使用宿主默认模型', value: '' }, ...aiModels.value.map((m) => ({ label: m.label, value: m.id }))]
+})
+
 const requestModeOptions = [
   { label: 'Signature（X-MT-Signature，推荐）', value: 'signature' },
   { label: 'Edge Token（Authorization Bearer，兜底）', value: 'edge' }
@@ -135,6 +146,19 @@ async function loadSettings(): Promise<void> {
     microsoft.value = {
       requestMode: (m.requestMode as 'edge' | 'signature') || 'edge'
     }
+    // AI 翻译 / AI OCR 配置回填
+    const at = window.services.getTranslateSettings('ai-translation')
+    aiTranslation.value = { model: at.model || '', systemPrompt: at.systemPrompt || '' }
+    const ao = window.services.getOcrSettings('ai-ocr')
+    aiOcr.value = { model: ao.model || '', systemPrompt: ao.systemPrompt || '' }
+    // 拉取宿主已配置的 AI 模型列表，用于模型下拉
+    try {
+      const list = await window.ztools.allAiModels()
+      aiModels.value = (list || []).map((m) => ({ id: m.id, label: m.label }))
+    } catch (e) {
+      console.error('加载宿主 AI 模型列表失败', e)
+      aiModels.value = []
+    }
   } catch (e) {
     console.error('加载翻译设置失败', e)
   }
@@ -143,13 +167,19 @@ async function loadSettings(): Promise<void> {
 // 逐卡保存的 loading 态
 const saving = ref(false)
 
-async function saveProvider(p: 'baidu' | 'youdao' | 'microsoft'): Promise<void> {
+async function saveProvider(
+  p: 'baidu' | 'youdao' | 'microsoft' | 'ai-translation' | 'ai-ocr'
+): Promise<void> {
   saving.value = true
   try {
     if (p === 'baidu') window.services.setTranslateSettings('baidu', { ...baidu.value })
     else if (p === 'youdao')
       window.services.setTranslateSettings('youdao', { ...youdao.value })
-    else window.services.setTranslateSettings('microsoft', { ...microsoft.value })
+    else if (p === 'microsoft')
+      window.services.setTranslateSettings('microsoft', { ...microsoft.value })
+    else if (p === 'ai-translation')
+      window.services.setTranslateSettings('ai-translation', { ...aiTranslation.value })
+    else window.services.setOcrSettings('ai-ocr', { ...aiOcr.value })
     success('已保存')
     closeModal()
   } catch (e: any) {
@@ -160,7 +190,13 @@ async function saveProvider(p: 'baidu' | 'youdao' | 'microsoft'): Promise<void> 
 }
 
 // ─── Provider 元数据 ─────────────────────────────────────────────────
-type ProviderKey = 'baidu' | 'google' | 'youdao' | 'microsoft'
+type ProviderKey =
+  | 'baidu'
+  | 'google'
+  | 'youdao'
+  | 'microsoft'
+  | 'ai-translation'
+  | 'ai-ocr'
 
 interface ProviderMeta {
   key: ProviderKey
@@ -191,6 +227,16 @@ const providers: ProviderMeta[] = [
     key: 'microsoft',
     name: '微软翻译',
     desc: '免授权，可选 Signature 或 Edge Token 鉴权方案。'
+  },
+  {
+    key: 'ai-translation',
+    name: 'AI 翻译',
+    desc: '基于大语言模型翻译，复用宿主已配置的 AI 模型，无需密钥。'
+  },
+  {
+    key: 'ai-ocr',
+    name: 'AI 识图',
+    desc: '基于视觉模型识别图片文字，需选择支持视觉的模型。'
   }
 ]
 
@@ -201,14 +247,16 @@ const configured = computed(
       baidu: !!(baidu.value.appID && baidu.value.appKey),
       google: true,
       youdao: !!(youdao.value.appKey && youdao.value.appSecret),
-      microsoft: true
+      microsoft: true,
+      'ai-translation': true, // 模型可留空走宿主默认，始终视为可用
+      'ai-ocr': !!aiOcr.value.model
     }) as Record<ProviderKey, boolean>
 )
 
 function providerStatus(
   p: ProviderMeta
 ): { type: 'success' | 'warning'; text: string } {
-  if (p.key === 'google' || p.key === 'microsoft')
+  if (p.key === 'google' || p.key === 'microsoft' || p.key === 'ai-translation')
     return { type: 'success', text: '已安装' }
   return configured.value[p.key]
     ? { type: 'success', text: '已安装' }
@@ -491,13 +539,57 @@ onMounted(() => {
           </template>
 
           <!-- 谷歌 -->
-          <template v-else>
+          <template v-else-if="activeProvider.key === 'google'">
             <p class="field-hint">
               使用 Google 官方免费接口 <code>translate.googleapis.com</code>，无需凭据。
             </p>
             <p class="field-hint">
               该域名为 Google 官方地址，国内网络通常无法直连，需走系统代理；如不可用可改用其他 provider。
             </p>
+          </template>
+
+          <!-- AI 翻译（走宿主 ztools.ai，复用宿主已配置的 AI 模型） -->
+          <template v-else-if="activeProvider.key === 'ai-translation'">
+            <div class="field">
+              <label>模型</label>
+              <ZSelect
+                v-model="aiTranslation.model"
+                :options="aiModelOptions"
+                placeholder="选择模型（留空走宿主默认）"
+              />
+            </div>
+            <div class="field">
+              <label>系统提示词（支持 {from}/{to} 占位替换）</label>
+              <textarea
+                v-model="aiTranslation.systemPrompt"
+                class="ai-textarea"
+                rows="4"
+                placeholder="如：你是一个专业翻译。将用户输入翻译成 {to}，只输出译文，不要解释。"
+              ></textarea>
+            </div>
+            <p class="field-hint">无需密钥：复用宿主「AI 模型」中已配置的模型与 API Key。</p>
+          </template>
+
+          <!-- AI 识图（走宿主 ztools.ai，需支持视觉的模型） -->
+          <template v-else-if="activeProvider.key === 'ai-ocr'">
+            <div class="field">
+              <label>模型（须选支持视觉的模型）</label>
+              <ZSelect
+                v-model="aiOcr.model"
+                :options="aiModelOptions"
+                placeholder="选择支持视觉的模型"
+              />
+            </div>
+            <div class="field">
+              <label>系统提示词</label>
+              <textarea
+                v-model="aiOcr.systemPrompt"
+                class="ai-textarea"
+                rows="4"
+                placeholder="如：识别图片中的所有文字，按原文逐行输出，只输出文字。"
+              ></textarea>
+            </div>
+            <p class="field-hint">纯文本模型无法识图，请选择如 GPT-4o 等支持视觉输入的模型。</p>
           </template>
         </div>
 
@@ -508,7 +600,7 @@ onMounted(() => {
             type="primary"
             size="small"
             :loading="saving"
-            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'microsoft')"
+            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'microsoft' | 'ai-translation' | 'ai-ocr')"
           >
             保存
           </ZButton>
@@ -804,6 +896,24 @@ code {
 
 .field-hint a {
   color: var(--primary-color, #1976d2);
+}
+
+/* AI provider 配置弹窗的多行 prompt 输入框 */
+.ai-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary, #333);
+  background: var(--bg-input, #fff);
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 6px;
+  resize: vertical;
+  outline: none;
+}
+.ai-textarea:focus {
+  border-color: var(--primary-color, #1976d2);
 }
 
 /* ZModal 默认无宽度约束，这里限制弹窗宽度 */

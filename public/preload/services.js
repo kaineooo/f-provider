@@ -1155,7 +1155,12 @@ getTranslateSettings(provider) {
     baidu: { appID: '', appKey: '' },
     google: {},
     youdao: { appKey: '', appSecret: '' },
-    microsoft: { requestMode: 'signature' } // 'signature' | 'edge'
+    microsoft: { requestMode: 'signature' }, // 'signature' | 'edge'
+    // AI 翻译：复用宿主已配置的 AI 模型（走 ztools.ai），此处只存模型选择与 prompt 模板，不存密钥。
+    'ai-translation': {
+      model: '',
+      systemPrompt: '你是一个专业翻译。将用户输入翻译成 {to}，只输出译文，不要解释或附加说明。'
+    }
   }
   const base = defaults[provider] || {}
   const stored = window.ztools.dbStorage.getItem('translate.' + provider) || {}
@@ -1170,6 +1175,25 @@ getTranslateSettings(provider) {
 setTranslateSettings(provider, data) {
   data = data || {}
   window.ztools.dbStorage.setItem('translate.' + provider, data)
+},
+
+// 读某 OCR provider 的设置（合并默认值）。现有 ocr/latex-ocr 无配置，仅 ai-ocr 需要模型选择与 prompt。
+getOcrSettings(provider) {
+  const defaults = {
+    'ai-ocr': {
+      model: '',
+      systemPrompt: '识别图片中的所有文字，按原文逐行输出，只输出识别到的文字，不要解释或附加说明。'
+    }
+  }
+  const base = defaults[provider] || {}
+  const stored = window.ztools.dbStorage.getItem('ocr.' + provider) || {}
+  return Object.assign({}, base, stored)
+},
+
+// 写某 OCR provider 的设置到 ztools.dbStorage。
+setOcrSettings(provider, data) {
+  data = data || {}
+  window.ztools.dbStorage.setItem('ocr.' + provider, data)
 },
 
 // 把中性语言码映射到 provider 自家码；不支持的语种返回 null。
@@ -1358,7 +1382,63 @@ async translateMicrosoft(text, from, to) {
     throw new Error('微软翻译返回异常: ' + resp.body.slice(0, 200))
   }
   return { text: arr[0].translations[0].text, detectedFrom: from }
+  },
+
+// ─── AI 翻译 / AI OCR（走宿主 ztools.ai）─────────────────────────────────
+// 复用宿主已配置的 AI 模型，本插件不存 apiKey/baseUrl，仅存模型选择与 prompt 模板。
+// ztools.ai 非流式返回 { content, reasoning_content? }；system 提示须放进 messages[0]。
+// 注意：handler 内 this 不是 services，故这两个方法经 window.services.xxx 调用时，
+// 内部若要读配置须用 this.getTranslateSettings / this.getOcrSettings（与其它翻译方法一致）。
+
+// AI 翻译：input { text, from?, to? } -> { text, detectedFrom? }
+// model 留空则 ztools.ai 自动按宿主已启用供应商顺序选首个模型；prompt 模板支持 {from}/{to} 占位。
+async translateAi(text, from, to) {
+  if (!to) to = this._resolveDefaultTargetLang(text) // 未指定目标语言时按内容推断（中→英，其余→中）
+  const { model, systemPrompt } = this.getTranslateSettings('ai-translation')
+  const prompt = (systemPrompt || '')
+    .replace(/\{from\}/g, from && from !== 'auto' ? from : '自动检测')
+    .replace(/\{to\}/g, to)
+  const res = await window.ztools.ai({
+    model: model || undefined,
+    messages: [
+      { role: 'system', content: prompt },
+      { role: 'user', content: text || '' }
+    ]
+  })
+  const out = (res && res.content ? String(res.content) : '').trim()
+  if (!out) throw new Error('AI 翻译返回为空，请检查宿主 AI 模型配置')
+  return { text: out, detectedFrom: from }
+},
+
+// AI OCR：input { image, lang? } -> { text, blocks?, confidence? }
+// image 可为 本地路径 / data URI / http(s) URL：本地路径经 readFileAsDataURL 转 data URI 后传入。
+// 必须选择支持视觉的模型，宿主不识别「视觉模型」概念，纯文本模型会由远端报错透传。
+async ocrAi(image, lang) {
+  const { model, systemPrompt } = this.getOcrSettings('ai-ocr')
+  if (!model) throw new Error('AI 识图未选择模型，请在「翻译/OCR 提供商」设置页选择支持视觉的模型')
+  if (!image) throw new Error('AI 识图未提供图片')
+  // 归一化图片为 ztools.ai 接受的 url（http(s):// 或 data: URI）
+  let imageUrl = image
+  if (!/^https?:\/\//i.test(image) && !/^data:/i.test(image)) {
+    imageUrl = this.readFileAsDataURL(image)
   }
+  const res = await window.ztools.ai({
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt || '识别图片中的所有文字，只输出识别到的文字。' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: lang ? `请识别这张图片中的文字（语言：${lang}）。` : '请识别这张图片中的所有文字。' },
+          { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } }
+        ]
+      }
+    ]
+  })
+  const out = (res && res.content ? String(res.content) : '').trim()
+  if (!out) throw new Error('AI 识图返回为空，请确认所选模型支持视觉输入')
+  return { text: out }
+}
 }
 
 // ─── 注册 Providers ──────────────────────────────────────────────────────
@@ -1395,4 +1475,16 @@ ztools.registerProvider('youdao', async (input) => {
 ztools.registerProvider('microsoft', async (input) => {
   const { text, from, to } = input || {}
   return await window.services.translateMicrosoft(text, from, to)
+})
+
+// AI 翻译（走宿主 ztools.ai）：input { text, from?, to? } -> { text, detectedFrom? }
+ztools.registerProvider('ai-translation', async (input) => {
+  const { text, from, to } = input || {}
+  return await window.services.translateAi(text, from, to)
+})
+
+// AI 识图（走宿主 ztools.ai，需视觉模型）：input { image, lang? } -> { text }
+ztools.registerProvider('ai-ocr', async (input) => {
+  const { image, lang } = input || {}
+  return await window.services.ocrAi(image, lang)
 })

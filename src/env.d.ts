@@ -138,7 +138,12 @@ declare global {
   }
 
   /** 翻译 Provider 名称（即 plugin.json providers 字段的 key）。 */
-  type TranslateProviderName = 'baidu' | 'google' | 'youdao' | 'microsoft'
+  type TranslateProviderName =
+    | 'baidu'
+    | 'google'
+    | 'youdao'
+    | 'microsoft'
+    | 'ai-translation'
 
   /** 微软翻译鉴权方案。 */
   type MicrosoftRequestMode = 'edge' | 'signature'
@@ -149,6 +154,13 @@ declare global {
     google: Record<string, never>
     youdao: { appKey: string; appSecret: string }
     microsoft: { requestMode: MicrosoftRequestMode }
+    /** AI 翻译：复用宿主 AI 模型，不存密钥；model 留空走宿主默认。 */
+    'ai-translation': { model: string; systemPrompt: string }
+  }
+
+  /** AI OCR provider 的设置（复用宿主 AI 视觉模型，不存密钥）。 */
+  interface OcrSettingsMap {
+    'ai-ocr': { model: string; systemPrompt: string }
   }
 
   interface Services {
@@ -254,6 +266,14 @@ declare global {
     translateYoudao: (text: string, from?: string, to?: string) => Promise<TranslateProviderOutput>
     /** 微软翻译。 */
     translateMicrosoft: (text: string, from?: string, to?: string) => Promise<TranslateProviderOutput>
+    /** 读某 OCR provider 的设置（合并默认值）。 */
+    getOcrSettings: <P extends keyof OcrSettingsMap>(provider: P) => OcrSettingsMap[P]
+    /** 写某 OCR provider 的设置。 */
+    setOcrSettings: <P extends keyof OcrSettingsMap>(provider: P, data: OcrSettingsMap[P]) => void
+    /** AI 翻译（走宿主 ztools.ai，model 留空走宿主默认模型）。 */
+    translateAi: (text: string, from?: string, to?: string) => Promise<TranslateProviderOutput>
+    /** AI 识图（走宿主 ztools.ai，需选择支持视觉的模型）。 */
+    ocrAi: (image: string, lang?: string) => Promise<OcrProviderOutput>
   }
 
   interface Window {
