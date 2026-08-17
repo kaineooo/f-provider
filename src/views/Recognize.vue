@@ -39,8 +39,15 @@ const props = withDefaults(
      * 由 watcher 触发。截图结果留在本页展示，不再弹独立窗口。
      */
     autoCapture?: boolean;
+    /**
+     * 文字识别成功后自动上抛 translate 事件，由父组件切到「翻译」tab 预填并翻译
+     * （screen-ocr-translate / ocr-translate feature）。
+     * 门控 translateFired 确保同一张图只联动一次；换新图（resetResults）后重置，
+     * 允许再次联动。OCR 空结果 / 失败不上抛。
+     */
+    translateAfterOcr?: boolean;
   }>(),
-  { initialImage: "", initialMode: "text", autoCapture: false },
+  { initialImage: "", initialMode: "text", autoCapture: false, translateAfterOcr: false },
 );
 
 // 响应式暗色标记：宿主切换主题时同步，用于避免 :global(html.dark) 在 scoped 下不生效。
@@ -57,6 +64,7 @@ const { isDark } = useColorScheme();
 const emit = defineEmits<{
   (e: "mode-change", mode: "text" | "formula"): void;
   (e: "history", item: HistoryEmitItem): void;
+  (e: "translate", text: string): void;
 }>();
 
 const { success, error } = useToast();
@@ -101,6 +109,11 @@ const ocrLoading = ref(false);
 const ocrError = ref("");
 const ocrLines = ref<OcrLine[]>([]);
 const ocrDone = ref(false); // 标记是否已识别过（区分空结果与未识别）
+/**
+ * 识别并翻译联动门控：translateAfterOcr 下首次文字识别成功才上抛一次 translate，
+ * 切回本 tab 对同一图重识别不二次跳翻译；换新图经 resetResults 重置后可再次联动。
+ */
+const translateFired = ref(false);
 
 // 公式识别结果
 const latexLoading = ref(false);
@@ -210,6 +223,7 @@ function resetResults() {
   ocrLines.value = [];
   ocrError.value = "";
   ocrDone.value = false;
+  translateFired.value = false;
   latex.value = "";
   latexError.value = "";
   latexDone.value = false;
@@ -272,6 +286,15 @@ async function recognizeText() {
             lines: ocrLines.value.map((l) => ({ ...l })),
           },
         });
+        // 识别并翻译联动：translateAfterOcr 下首次成功才上抛一次（门控 translateFired），
+        // 父组件切到「翻译」tab 预填识别文字并触发翻译。换新图重置门控后可再次联动。
+        if (props.translateAfterOcr && !translateFired.value) {
+          translateFired.value = true;
+          emit(
+            "translate",
+            ocrLines.value.map((l) => l.text).join("\n"),
+          );
+        }
       }
     } else {
       ocrError.value = result.error || "识别失败";
