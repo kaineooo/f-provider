@@ -51,6 +51,11 @@
       "type": "ocr",
       "label": "AI 识图",
       "description": "基于视觉模型识别图片文字（需选择支持视觉的模型）"
+    },
+    "ai-latex-ocr": {
+      "type": "ocr",
+      "label": "AI 公式识别",
+      "description": "基于视觉模型识别图片中的数学公式为 LaTeX（需选择支持视觉的模型）"
     }
   },
   "features": [

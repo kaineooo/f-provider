@@ -123,6 +123,9 @@ const microsoft = ref<{ requestMode: 'edge' | 'signature' }>({ requestMode: 'edg
 // AI 翻译 / AI OCR：复用宿主已配置的 AI 模型，此处仅存模型选择与 prompt 模板（不存密钥）。
 const aiTranslation = ref({ model: '', systemPrompt: '' })
 const aiOcr = ref({ model: '', systemPrompt: '' })
+const aiLatexOcr = ref({ model: '', systemPrompt: '' })
+// 图床设置（ai-ocr / ai-latex-ocr 共用）：默认开启，关闭则 AI 识图回退 base64 直传。
+const imageHost = ref<ImageHostSettings>({ enabled: true, type: 'img-scdn' })
 // 宿主已配置的 AI 模型列表（ztools.allAiModels()），用于模型下拉。
 const aiModels = ref<{ id: string; label: string }[]>([])
 // 模型下拉选项：未配置模型时只给一个禁用占位，避免误选空值。
@@ -134,6 +137,11 @@ const aiModelOptions = computed(() => {
 const requestModeOptions = [
   { label: 'Signature（X-MT-Signature，推荐）', value: 'signature' },
   { label: 'Edge Token（Authorization Bearer，兜底）', value: 'edge' }
+]
+
+// 图床类型下拉：后续新增图床在此加一项 + ImageHostType 联合类型扩一项。
+const imageHostTypeOptions = [
+  { label: 'img.scdn.io', value: 'img-scdn' }
 ]
 
 async function loadSettings(): Promise<void> {
@@ -151,6 +159,14 @@ async function loadSettings(): Promise<void> {
     aiTranslation.value = { model: at.model || '', systemPrompt: at.systemPrompt || '' }
     const ao = window.services.getOcrSettings('ai-ocr')
     aiOcr.value = { model: ao.model || '', systemPrompt: ao.systemPrompt || '' }
+    const alo = window.services.getOcrSettings('ai-latex-ocr')
+    aiLatexOcr.value = { model: alo.model || '', systemPrompt: alo.systemPrompt || '' }
+    // 图床配置回填（enabled 默认 true：旧数据无该 key 时兜底为开启）
+    const ih = window.services.getImageHostSettings()
+    imageHost.value = {
+      enabled: ih.enabled !== false,
+      type: (ih.type as ImageHostType) || 'img-scdn'
+    }
     // 拉取宿主已配置的 AI 模型列表，用于模型下拉
     try {
       const list = await window.ztools.allAiModels()
@@ -168,7 +184,14 @@ async function loadSettings(): Promise<void> {
 const saving = ref(false)
 
 async function saveProvider(
-  p: 'baidu' | 'youdao' | 'microsoft' | 'ai-translation' | 'ai-ocr'
+  p:
+    | 'baidu'
+    | 'youdao'
+    | 'microsoft'
+    | 'ai-translation'
+    | 'ai-ocr'
+    | 'ai-latex-ocr'
+    | 'image-host'
 ): Promise<void> {
   saving.value = true
   try {
@@ -179,7 +202,11 @@ async function saveProvider(
       window.services.setTranslateSettings('microsoft', { ...microsoft.value })
     else if (p === 'ai-translation')
       window.services.setTranslateSettings('ai-translation', { ...aiTranslation.value })
-    else window.services.setOcrSettings('ai-ocr', { ...aiOcr.value })
+    else if (p === 'ai-ocr') window.services.setOcrSettings('ai-ocr', { ...aiOcr.value })
+    else if (p === 'ai-latex-ocr')
+      window.services.setOcrSettings('ai-latex-ocr', { ...aiLatexOcr.value })
+    else if (p === 'image-host')
+      window.services.setImageHostSettings({ ...imageHost.value })
     success('已保存')
     closeModal()
   } catch (e: any) {
@@ -197,6 +224,8 @@ type ProviderKey =
   | 'microsoft'
   | 'ai-translation'
   | 'ai-ocr'
+  | 'ai-latex-ocr'
+  | 'image-host'
 
 interface ProviderMeta {
   key: ProviderKey
@@ -237,6 +266,17 @@ const providers: ProviderMeta[] = [
     key: 'ai-ocr',
     name: 'AI 识图',
     desc: '基于视觉模型识别图片文字，需选择支持视觉的模型。'
+  },
+  {
+    key: 'ai-latex-ocr',
+    name: 'AI 公式识别',
+    desc: '基于视觉模型识别数学公式为 LaTeX，需选择支持视觉的模型。'
+  },
+  {
+    key: 'image-host',
+    name: '图床',
+    desc: 'AI 识图/公式识别的图片来源：先上传图床再发 AI（省 token、防截断），默认开启，失败自动回退直传。',
+    docsUrl: 'https://img.scdn.io/api_docs.php'
   }
 ]
 
@@ -249,7 +289,9 @@ const configured = computed(
       youdao: !!(youdao.value.appKey && youdao.value.appSecret),
       microsoft: true,
       'ai-translation': true, // 模型可留空走宿主默认，始终视为可用
-      'ai-ocr': !!aiOcr.value.model
+      'ai-ocr': !!aiOcr.value.model,
+      'ai-latex-ocr': !!aiLatexOcr.value.model,
+      'image-host': imageHost.value.enabled
     }) as Record<ProviderKey, boolean>
 )
 
@@ -258,6 +300,10 @@ function providerStatus(
 ): { type: 'success' | 'warning'; text: string } {
   if (p.key === 'google' || p.key === 'microsoft' || p.key === 'ai-translation')
     return { type: 'success', text: '已安装' }
+  if (p.key === 'image-host')
+    return imageHost.value.enabled
+      ? { type: 'success', text: '已启用' }
+      : { type: 'warning', text: '已停用' }
   return configured.value[p.key]
     ? { type: 'success', text: '已安装' }
     : { type: 'warning', text: '待配置' }
@@ -591,6 +637,48 @@ onMounted(() => {
             </div>
             <p class="field-hint">纯文本模型无法识图，请选择如 GPT-4o 等支持视觉输入的模型。</p>
           </template>
+
+          <!-- AI 公式识别（走宿主 ztools.ai，需支持视觉的模型） -->
+          <template v-else-if="activeProvider.key === 'ai-latex-ocr'">
+            <div class="field">
+              <label>模型（须选支持视觉的模型）</label>
+              <ZSelect
+                v-model="aiLatexOcr.model"
+                :options="aiModelOptions"
+                placeholder="选择支持视觉的模型"
+              />
+            </div>
+            <div class="field">
+              <label>系统提示词</label>
+              <textarea
+                v-model="aiLatexOcr.systemPrompt"
+                class="ai-textarea"
+                rows="4"
+                placeholder="如：识别图片中的数学公式并输出对应的 LaTeX 源码，只输出 LaTeX 代码。"
+              ></textarea>
+            </div>
+            <p class="field-hint">提示词应要求只输出 LaTeX 源码、不加 $ 包裹；AI 误加的围栏会被自动剔除。</p>
+          </template>
+
+          <!-- 图床（ai-ocr / ai-latex-ocr 共用的图片上传通道） -->
+          <template v-else-if="activeProvider.key === 'image-host'">
+            <div class="field">
+              <label class="switch-field">
+                <input type="checkbox" v-model="imageHost.enabled" />
+                <span>启用图床上传</span>
+              </label>
+              <p class="field-hint">关闭后 AI 识图改用 base64 直传 vision 模型（大图易超 token / 触发截断）。</p>
+            </div>
+            <div class="field" v-if="imageHost.enabled">
+              <label>图床类型</label>
+              <ZSelect
+                v-model="imageHost.type"
+                :options="imageHostTypeOptions"
+                placeholder="选择图床"
+              />
+              <p class="field-hint">当前 img.scdn.io 走 Cloudflare R2 存储（storage_destination=r2），免鉴权。上传失败或被限流（429）时自动回退 base64 直传。</p>
+            </div>
+          </template>
         </div>
 
         <footer class="modal-foot">
@@ -600,7 +688,7 @@ onMounted(() => {
             type="primary"
             size="small"
             :loading="saving"
-            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'microsoft' | 'ai-translation' | 'ai-ocr')"
+            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'microsoft' | 'ai-translation' | 'ai-ocr' | 'ai-latex-ocr' | 'image-host')"
           >
             保存
           </ZButton>
