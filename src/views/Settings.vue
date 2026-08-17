@@ -131,7 +131,7 @@ const aiModels = ref<{ id: string; label: string }[]>([])
 // 模型下拉选项：未配置模型时只给一个禁用占位，避免误选空值。
 const aiModelOptions = computed(() => {
   if (!aiModels.value.length) return [{ label: '尚未配置 AI 模型', value: '', disabled: true }]
-  return [{ label: '使用宿主默认模型', value: '' }, ...aiModels.value.map((m) => ({ label: m.label, value: m.id }))]
+  return [{ label: '使用 ZTools 默认模型', value: '' }, ...aiModels.value.map((m) => ({ label: m.label, value: m.id }))]
 })
 
 const requestModeOptions = [
@@ -260,7 +260,7 @@ const providers: ProviderMeta[] = [
   {
     key: 'ai-translation',
     name: 'AI 翻译',
-    desc: '基于大语言模型翻译，复用宿主已配置的 AI 模型，无需密钥。'
+    desc: '基于大语言模型翻译，复用 ZTools 已配置的 AI 模型，无需密钥。'
   },
   {
     key: 'ai-ocr',
@@ -601,7 +601,7 @@ onMounted(() => {
               <ZSelect
                 v-model="aiTranslation.model"
                 :options="aiModelOptions"
-                placeholder="选择模型（留空走宿主默认）"
+                placeholder="选择模型（留空走 ZTools 默认）"
               />
             </div>
             <div class="field">
@@ -613,7 +613,7 @@ onMounted(() => {
                 placeholder="如：你是一个专业翻译。将用户输入翻译成 {to}，只输出译文，不要解释。"
               ></textarea>
             </div>
-            <p class="field-hint">无需密钥：复用宿主「AI 模型」中已配置的模型与 API Key。</p>
+            <p class="field-hint">无需密钥：复用 ZTools「AI 模型」中已配置的模型与 API Key。</p>
           </template>
 
           <!-- AI 识图（走宿主 ztools.ai，需支持视觉的模型） -->

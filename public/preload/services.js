@@ -1255,7 +1255,7 @@ setTranslateSettings(provider, data) {
   window.ztools.dbStorage.setItem('translate.' + provider, data)
 },
 
-// 读某 OCR provider 的设置（合并默认值）。现有 ocr/latex-ocr 无配置，
+// 读某 OCR provider 的设置（合并默认值）。现有 ocr 无配置，
 // ai-ocr 与 ai-latex-ocr 复用宿主 AI 视觉模型，需模型选择与 prompt 模板（不存密钥）。
 getOcrSettings(provider) {
   const defaults = {
@@ -1543,7 +1543,7 @@ async translateAi(text, from, to) {
     ]
   })
   const out = (res && res.content ? String(res.content) : '').trim()
-  if (!out) throw new Error('AI 翻译返回为空，请检查宿主 AI 模型配置')
+  if (!out) throw new Error('AI 翻译返回为空，请检查 ZTools AI 模型配置')
   return { text: out, detectedFrom: from }
 },
 
@@ -1658,13 +1658,6 @@ ztools.registerProvider('ocr', async (input) => {
   return await window.services.ocrRecognize(image)
 })
 
-// LaTeX 公式识别 OCR 契约（与 ocr 一致）：input { image } -> { text, blocks, confidence }
-// text 为识别出的 LaTeX 源码；blocks 为单元素数组（整段公式）。
-ztools.registerProvider('latex-ocr', async (input) => {
-  const { image } = input || {}
-  return await window.services.latexRecognize(image)
-})
-
 // 翻译契约（对齐宿主 TranslationInput/Output）：
 // input { text, from?, to? } -> { text, detectedFrom? }
 // 注意：handler 内不能用 this（this 在 registerProvider 回调里不是 services），
@@ -1696,12 +1689,4 @@ ztools.registerProvider('ai-translation', async (input) => {
 ztools.registerProvider('ai-ocr', async (input) => {
   const { image, lang } = input || {}
   return await window.services.ocrAi(image, lang)
-})
-
-// AI 公式识别（走宿主 ztools.ai，需视觉模型）：input { image } -> { text, blocks, confidence }
-// text 为识别出的 LaTeX 源码；blocks 为单元素数组（整段公式）。
-ztools.registerProvider('ai-latex-ocr', async (input) => {
-  const { image } = input || {}
-  const r = await window.services.latexAi(image)
-  return { text: r.latex, blocks: [r.latex], confidence: 1 }
 })
