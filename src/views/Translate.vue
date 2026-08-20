@@ -281,12 +281,26 @@ watch(
   () => props.initialText,
   (text) => {
     if (!text) return
-    suppressAuto = true
-    sourceText.value = text
-    run()
+    applyText(text)
   },
   { immediate: true }
 )
+
+/**
+ * 预填原文并立即翻译一次。
+ * - 抑制由程序化赋值引发的下一次自动翻译，避免「立即 run + 1s 后又 run」双重翻译。
+ * - 允许相同文本重复触发（不依赖 watch 值变化），供父组件在用户手动切 tab 时
+ *   把 OCR 识别结果带入翻译输入框。
+ */
+function applyText(text: string) {
+  if (!text) return
+  suppressAuto = true
+  sourceText.value = text
+  run()
+}
+
+// 暴露给父组件：手动切到翻译 tab 时预填 OCR 识别结果（不受 watch 值比较限制）
+defineExpose({ applyText })
 
 onMounted(() => {
   // 渠道回填已在 setup 期完成，此处仅做首挂聚焦 + 窗口失焦/恢复监听。

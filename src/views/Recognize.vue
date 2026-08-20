@@ -65,6 +65,13 @@ const emit = defineEmits<{
   (e: "mode-change", mode: "text" | "formula"): void;
   (e: "history", item: HistoryEmitItem): void;
   (e: "translate", text: string): void;
+  /**
+   * 文字识别成功后上抛当前识别文本（供父组件在用户手动切到翻译 tab 时带入）。
+   * 与 translate 事件不同：translate 仅 translateAfterOcr 联动场景触发且只一次，
+   * text-result 在每次文字识别成功（含重识别、切渠道重识别）后都同步最新结果。
+   * 空结果不上抛。
+   */
+  (e: "text-result", text: string): void;
 }>();
 
 const { success, error } = useToast();
@@ -415,9 +422,17 @@ function applyOcrLines(lines: OcrLine[]) {
   ocrLines.value = lines;
   if (lines.length === 0) {
     error("未识别到文字");
+    // 空结果不上抛 text-result，避免清空翻译框
     return;
   }
   success(`识别完成，共 ${lines.length} 行`);
+  // 同步当前识别文本给父组件：供用户手动切到翻译 tab 时带入翻译输入框。
+  // AI 渠道以 aiText 为准（可被用户编辑），微信 OCR 渠道拼装各行文本。
+  const text =
+    textProvider.value === "ai-ocr"
+      ? aiText.value
+      : lines.map((l) => l.text).join("\n");
+  emit("text-result", text);
   // 上抛历史记录：只有真正调识别服务成功才留一笔（命中缓存不会进此分支）
   emit("history", {
     kind: "ocr-text",
@@ -433,7 +448,7 @@ function applyOcrLines(lines: OcrLine[]) {
   // 父组件切到「翻译」tab 预填识别文字并触发翻译。换新图重置门控后可再次联动。
   if (props.translateAfterOcr && !translateFired.value) {
     translateFired.value = true;
-    emit("translate", lines.map((l) => l.text).join("\n"));
+    emit("translate", text);
   }
 }
 
