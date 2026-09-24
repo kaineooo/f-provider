@@ -272,6 +272,9 @@ window.services = {
 
   // 核心 OCR：image 为 本地路径 / data URI / http(s) URL。
   // 返回 provider 契约结构 { text, blocks?, confidence? }；失败抛错。
+  // blocks 优先给带行级坐标的对象（Windows/macos 微信 OCR addon 均返回
+  // left/top/right/bottom，图像像素坐标）——截图翻译的原生层靠行框做段落
+  // 聚类与译文覆盖定位；行缺坐标时回退纯字符串（原生侧按整图兜底整段翻译）。
   async ocrRecognize(image /*, lang */) {
     const tmpFile = await this._ocrMaterialize(image)
     const isTemp = tmpFile !== image
@@ -279,9 +282,13 @@ window.services = {
       const result = await this._ocrRun(tmpFile)
       if (!result.ok) throw new Error(result.error || '微信 OCR 识别失败')
       const lines = result.lines || []
+      const hasBox = (l) => ['left', 'top', 'right', 'bottom']
+        .every((k) => typeof l[k] === 'number' && isFinite(l[k]))
       return {
         text: lines.map((l) => l.text).join('\n'),
-        blocks: lines.map((l) => l.text),
+        blocks: lines.map((l) => (hasBox(l)
+          ? { text: l.text, left: l.left, top: l.top, right: l.right, bottom: l.bottom }
+          : l.text)),
         confidence: lines.length
           ? lines.reduce((s, l) => s + (l.rate || 0), 0) / lines.length
           : 0
