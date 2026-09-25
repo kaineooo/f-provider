@@ -46,11 +46,17 @@ const props = withDefaults(
      * 'left' 用于公式识别模式——避免居中遮挡右下角的复制按钮组。
      */
     dockAlign?: 'center' | 'left'
+    /**
+     * 悬浮导航栏常驻（插件设置 dockAlwaysVisible）。
+     * true：始终显示，无需鼠标靠近底部；false：鼠标进入底部触发区才滑入。
+     */
+    dockAlwaysVisible?: boolean
   }>(),
   {
     title: '',
     version: null,
-    dockAlign: 'center'
+    dockAlign: 'center',
+    dockAlwaysVisible: false
   }
 )
 
@@ -74,7 +80,7 @@ const showSubBar = computed(
   () => !!activeGroup.value && (activeGroup.value.children?.length ?? 0) > 1
 )
 
-/** 鼠标是否悬停在页面底部触发区（用于显隐悬浮栏） */
+/** 鼠标悬停在页面底部触发区（用于显隐悬浮栏；常驻开关开启时无需触发） */
 const dockVisible = ref(false)
 
 /** 鼠标移入悬浮栏本身时锁定显示，避免抖动 */
@@ -99,7 +105,10 @@ function onDockLeave() {
   dockHovered.value = false
 }
 
-const dockShow = computed(() => dockVisible.value || dockHovered.value)
+/** 是否显示悬浮栏：常驻开关优先，其次鼠标位置 / 悬停锁定 */
+const dockShow = computed(
+  () => props.dockAlwaysVisible || dockVisible.value || dockHovered.value
+)
 
 // 激活主按钮在 items 中的索引（驱动滑动高亮指示条）
 const activeIndex = computed(() =>
@@ -136,7 +145,10 @@ function selectChild(child: NavChild) {
     @mouseleave="onContentLeave"
   >
     <!-- 内容区：底部预留少量 padding 防止悬浮栏遮挡关键内容 -->
-    <main class="content" :class="{ 'has-sub': showSubBar }">
+    <main
+      class="content"
+      :class="{ 'has-sub': showSubBar, 'has-dock': dockAlwaysVisible }"
+    >
       <slot />
     </main>
 
@@ -229,6 +241,17 @@ function selectChild(child: NavChild) {
 /* 激活主组带子切换条时，多留一点 */
 .content.has-sub {
   padding-bottom: 16px;
+}
+
+/* 悬浮栏常驻时：按悬浮栏实际高度预留，避免遮挡各页底部内容
+   （满高布局的子页按 padding 后的内容高计算 100%，也会相应让出空间）。
+   与 .has-sub 同为双类选择器，靠源序在后覆盖上面的 16px。 */
+.content.has-dock {
+  padding-bottom: 60px;
+}
+
+.content.has-dock.has-sub {
+  padding-bottom: 84px;
 }
 
 /* ── 底部悬浮栏 ── */

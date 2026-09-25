@@ -2,6 +2,7 @@
 import { ref, computed, markRaw, watch, onMounted, nextTick } from 'vue'
 import SettingLayout from '../components/SettingLayout.vue'
 import type { NavItem } from '../components/SettingLayout.vue'
+import Channels from '../views/Channels.vue'
 import Settings from '../views/Settings.vue'
 import Recognize from '../views/Recognize.vue'
 import Translate from '../views/Translate.vue'
@@ -9,6 +10,7 @@ import HistoryView from '../components/HistoryView.vue'
 import { useNativeEngine } from '../composables/useNativeEngine'
 import { useLatexEngine } from '../composables/useLatexEngine'
 import { useHistory } from '../composables/useHistory'
+import { usePluginSettings } from '../composables/usePluginSettings'
 
 /**
  * 管理主入口（唯一 feature，跨平台）：底部悬浮栏式布局。
@@ -17,12 +19,14 @@ import { useHistory } from '../composables/useHistory'
  *       - latex-recognize feature → 公式模式
  *       - 其它 → 文字模式
  *   - over（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
- *   - text / 其它：保持「设置」tab
+ *   - text / 其它：保持「渠道」tab
  *
- * 底部三个主按钮：
- *   - 设置：OCR 引擎 + 翻译服务（卡片式）
+ * 底部五个主按钮：
+ *   - 渠道：OCR 引擎 + 翻译服务（卡片式，含凭据配置）
  *   - OCR 识别：文字识别 / 公式识别在同一页内顶部切换（不再分子项）
  *   - 翻译：单 provider 翻译器
+ *   - 历史记录：OCR / 翻译结果回看
+ *   - 设置：插件行为偏好（导航常驻 / 聚合段落 / 历史记录策略）
  */
 
 const props = defineProps<{
@@ -33,6 +37,8 @@ const props = defineProps<{
 const { nativeVersion, checkNative } = useNativeEngine()
 const { latexVersion, checkLatex } = useLatexEngine()
 const { loadHistory, pushHistory } = useHistory()
+// 插件行为设置：底部导航常驻开关透传给 SettingLayout（其余设置项由各读取方自行订阅）
+const { settings } = usePluginSettings()
 
 /**
  * 接收子组件（Recognize / Translate）上抛的历史记录条目，
@@ -78,7 +84,7 @@ interface TranslateExposed {
 }
 const translateRef = ref<TranslateExposed | null>(null)
 
-const activeKey = ref('settings')
+const activeKey = ref('channels')
 
 // 识别页当前模式（由 Recognize 上报）：公式模式下底部悬浮栏左对齐，
 // 避免遮挡右下角的三个复制按钮。
@@ -117,10 +123,11 @@ const enterSeq = ref(0)
 
 const items = computed<NavItem[]>(() => [
   {
-    key: 'settings',
-    label: '设置',
-    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><!-- Icon from Material Symbols by Google - https://github.com/google/material-design-icons/blob/master/LICENSE --><path fill="currentColor" d="M10.825 22q-.675 0-1.162-.45t-.588-1.1L8.85 18.8q-.325-.125-.612-.3t-.563-.375l-1.55.65q-.625.275-1.25.05t-.975-.8l-1.175-2.05q-.35-.575-.2-1.225t.675-1.075l1.325-1Q4.5 12.5 4.5 12.337v-.675q0-.162.025-.337l-1.325-1Q2.675 9.9 2.525 9.25t.2-1.225L3.9 5.975q.35-.575.975-.8t1.25.05l1.55.65q.275-.2.575-.375t.6-.3l.225-1.65q.1-.65.588-1.1T10.825 2h2.35q.675 0 1.163.45t.587 1.1l.225 1.65q.325.125.613.3t.562.375l1.55-.65q.625-.275 1.25-.05t.975.8l1.175 2.05q.35.575.2 1.225t-.675 1.075l-1.325 1q.025.175.025.338v.674q0 .163-.05.338l1.325 1q.525.425.675 1.075t-.2 1.225l-1.2 2.05q-.35.575-.975.8t-1.25-.05l-1.5-.65q-.275.2-.575.375t-.6.3l-.225 1.65q-.1.65-.587 1.1t-1.163.45zm1.225-6.5q1.45 0 2.475-1.025T15.55 12t-1.025-2.475T12.05 8.5q-1.475 0-2.488 1.025T8.55 12t1.013 2.475T12.05 15.5"/></svg>',
-    component: markRaw(Settings)
+    key: 'channels',
+    label: '渠道',
+    // 自绘「多渠道汇聚」图标（中心节点 + 四角节点）：与其他 tab 同为 currentColor 单色
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="2.7"/><circle cx="5" cy="5" r="1.9"/><circle cx="19" cy="5" r="1.9"/><circle cx="5" cy="19" r="1.9"/><circle cx="19" cy="19" r="1.9"/><path d="M6.34 6.34 10.09 10.09"/><path d="M17.66 6.34 13.91 10.09"/><path d="M6.34 17.66 10.09 13.91"/><path d="M17.66 17.66 13.91 13.91"/></svg>',
+    component: markRaw(Channels)
   },
   {
     key: 'recognize',
@@ -139,6 +146,12 @@ const items = computed<NavItem[]>(() => [
     label: '历史记录',
     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><!-- Icon from Material Symbols by Google - https://github.com/google/material-design-icons/blob/master/LICENSE --><path fill="currentColor" d="M13 3a9 9 0 0 0-9 9H1l3.75 3.75L5.5 16L9 12H6a7 7 0 0 1 7-7a7 7 0 0 1 7 7a7 7 0 0 1-7 7c-1.93 0-3.68-.79-4.95-2.05l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18m2.5 11.25l-3.5-3.5V7h2v3.25l2.75 2.75z"/></svg>',
     component: markRaw(HistoryView)
+  },
+  {
+    key: 'settings',
+    label: '设置',
+    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><!-- Icon from Material Symbols by Google - https://github.com/google/material-design-icons/blob/master/LICENSE --><path fill="currentColor" d="M10.825 22q-.675 0-1.162-.45t-.588-1.1L8.85 18.8q-.325-.125-.612-.3t-.563-.375l-1.55.65q-.625.275-1.25.05t-.975-.8l-1.175-2.05q-.35-.575-.2-1.225t.675-1.075l1.325-1Q4.5 12.5 4.5 12.337v-.675q0-.162.025-.337l-1.325-1Q2.675 9.9 2.525 9.25t.2-1.225L3.9 5.975q.35-.575.975-.8t1.25.05l1.55.65q.275-.2.575-.375t.6-.3l.225-1.65q.1-.65.588-1.1T10.825 2h2.35q.675 0 1.163.45t.587 1.1l.225 1.65q.325.125.613.3t.562.375l1.55-.65q.625-.275 1.25-.05t.975.8l1.175 2.05q.35.575.2 1.225t-.675 1.075l-1.325 1q.025.175.025.338v.674q0 .163-.05.338l1.325 1q.525.425.675 1.075t-.2 1.225l-1.2 2.05q-.35.575-.975.8t-1.25-.05l-1.5-.65q-.275.2-.575.375t-.6.3l-.225 1.65q-.1.65-.587 1.1t-1.163.45zm1.225-6.5q1.45 0 2.475-1.025T15.55 12t-1.025-2.475T12.05 8.5q-1.475 0-2.488 1.025T8.55 12t1.013 2.475T12.05 15.5"/></svg>',
+    component: markRaw(Settings)
   }
 ])
 
@@ -157,7 +170,7 @@ function extractImage(action: any): string {
 //   - latex-recognize + img/files：切到「识别」并自动进入公式模式跑 LaTeX 识别
 //   - 其它 code + img/files：切到「识别」并自动进入文字模式跑微信 OCR
 //   - over（带文本 payload）：切到「翻译」并自动预填文本、触发翻译
-//   - text / 其它：保持「设置」tab
+//   - text / 其它：保持「渠道」tab
 watch(
   () => props.enterAction,
   (action) => {
@@ -208,8 +221,8 @@ watch(
       enterSeq.value++
       return
     }
-    // text / 无 payload：保持默认 settings tab，但仍重建以清空可能的历史状态
-    activeKey.value = 'settings'
+    // text / 无 payload：保持默认「渠道」tab，但仍重建以清空可能的历史状态
+    activeKey.value = 'channels'
     enterSeq.value++
   },
   { immediate: true }
@@ -246,15 +259,18 @@ onMounted(() => {
     :items="items"
     :version="nativeVersion || latexVersion || undefined"
     :dock-align="dockAlign"
+    :dock-always-visible="settings.dockAlwaysVisible"
   >
   <!--
     Recognize / Translate 用 <KeepAlive> 缓存实例：底部悬浮栏切 tab 不再卸载，
-    切回时图片、识别结果、译文等用户数据完整保留。Settings 不过 keep-alive，
-    切走即卸载（设置页无用户输入，重 check 引擎状态即可）。
+    切回时图片、识别结果、译文等用户数据完整保留。Channels / Settings 不过
+    keep-alive，切走即卸载（两页都无用户输入，重挂载重新 check 引擎状态 /
+    重读设置单例即可）。
     :key 仍绑 enterSeq：仅当 onPluginEnter 重新进入（enterSeq++)时 key 改变，
     keep-alive 内 key 变更会销毁旧实例、挂载全新实例，确保新一轮预填生效、状态不残留。
     切 tab 不改 enterSeq，故 key 不变，缓存命中。
   -->
+  <Channels v-if="activeKey === 'channels'" :key="'channels-' + enterSeq" />
   <Settings v-if="activeKey === 'settings'" :key="'settings-' + enterSeq" />
   <KeepAlive>
     <Recognize

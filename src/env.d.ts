@@ -95,7 +95,8 @@ declare global {
 
   /**
    * 历史记录条目。由 Recognize / Translate 在完成识别/翻译后上抛给 Manage，
-   * 由 Manage 统一写入 dbStorage（key: `history.list`），最多保留 100 条。
+   * 由 Manage 统一写入 dbStorage（key: `history.list`）；条数上限与存留天数
+   * 取自插件设置（见 PluginSettings，默认 100 条 + 永久保留）。
    *
    * - OCR 记录：thumbnail / payload.imageSrc 均为 data URI（用户选择直接存，
    *   不落盘），点缩略图可复用 OcrImageViewer 的全屏预览能力。
@@ -129,6 +130,30 @@ declare global {
 
   /** 上抛给父级的历史记录条目（不含 id / ts，由父级补全）。 */
   type HistoryEmitItem = Omit<HistoryItem, 'id' | 'ts'>
+
+  // ─── 插件行为设置 ─────────────────────────────────────────────────────
+  /**
+   * 插件行为设置（「设置」页可改，与「渠道」页的引擎 / 凭据配置无关）。
+   * 由 usePluginSettings 单例读写并持久化到 dbStorage（key: `plugin.settings`）；
+   * 设置页改动即时落盘，读取方（SettingLayout / Recognize / useHistory）
+   * 订阅同一单例，无需重启插件即可生效。
+   */
+  interface PluginSettings {
+    /** 底部导航栏常驻：true 常显，false 鼠标靠近窗口底部才滑入。默认 false。 */
+    dockAlwaysVisible: boolean
+    /**
+     * OCR 结果聚合段落：true 时按版面几何把同一段落的多行合并为整段，
+     * 识别结果以段落（textarea 形式）回显，不再展示行级置信度，
+     * 复制 / 发送翻译均以聚合（或编辑后）文本为准。
+     * false 时保持逐行输出，右侧按行展示置信度明细并与图上高亮联动。
+     * 默认 true。
+     */
+    ocrMergeParagraphs: boolean
+    /** 历史记录最大条数（1 - 5000，超出淘汰最旧记录）。默认 100。 */
+    historyMaxItems: number
+    /** 历史记录存留天数（0 = 永久保留，只受条数上限约束）。默认 0。 */
+    historyRetentionDays: number
+  }
 
   // ─── 翻译 Provider 相关 ───────────────────────────────────────────────
   /** 翻译 Provider 输出（对齐宿主 TranslationOutput）。 */

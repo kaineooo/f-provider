@@ -7,7 +7,9 @@ import EngineStatusCard from "../components/EngineStatusCard.vue";
 import OcrImageViewer from "../components/OcrImageViewer.vue";
 import { useNativeEngine } from "../composables/useNativeEngine";
 import { useLatexEngine } from "../composables/useLatexEngine";
+import { usePluginSettings } from "../composables/usePluginSettings";
 import { useSegmentIndicator } from "../composables/useSegmentIndicator";
+import { aggregateOcrParagraphs, assembleOcrText } from "../utils/ocrText";
 
 /**
  * 识别子页（合并文字 OCR 与公式识别）：左右结构。
@@ -18,7 +20,8 @@ import { useSegmentIndicator } from "../composables/useSegmentIndicator";
  *   - 公式模式：普通 <img> 预览。
  * 右侧：结果面板。
  *   - 顶部：模式切换（文字 / 公式）+ 引擎状态标签 + 操作按钮。
- *   - 文字：识别行列表，与左侧图上文字双向高亮联动，点击复制。
+ *   - 文字：聚合开启时按段落 textarea 回显（可编辑、无置信度）；
+ *     关闭时为识别行列表，与左侧图上文字双向高亮联动，点击复制。
  *   - 公式：KaTeX 渲染预览 + LaTeX 源码 + 三种复制形式。
  *
  * 切换模式时保留同一张图片与各自的识别结果（互不干扰），可对同一图片
@@ -77,6 +80,8 @@ const emit = defineEmits<{
 const { success, error } = useToast();
 const { nativeReady, checkNative } = useNativeEngine();
 const { latexReady, checkLatex } = useLatexEngine();
+// 插件行为设置：OCR 结果聚合段落开关（见下方 assembledOcrText）
+const { settings } = usePluginSettings();
 
 // ─── 渠道选择（文字：微信 OCR / AI 识图；公式：本地引擎 / AI 公式识别）─────
 // 模式按钮右侧内嵌 sparkle 图标作为 AI 渠道开关：高亮=已启用 AI，点击在
@@ -162,7 +167,7 @@ function saveLastFormulaProvider(p: FormulaProviderName): void {
  */
 function toggleTextAi(): void {
   if (!providerConfigured.value["ai-ocr"]) {
-    error("请先在设置中配置 AI 识图模型");
+    error("请先在「渠道」页配置 AI 识图模型");
     return;
   }
   textProvider.value = textProvider.value === "ai-ocr" ? "ocr" : "ai-ocr";
@@ -174,7 +179,7 @@ function toggleTextAi(): void {
  */
 function toggleFormulaAi(): void {
   if (!providerConfigured.value["ai-latex-ocr"]) {
-    error("请先在设置中配置 AI 公式识别模型");
+    error("请先在「渠道」页配置 AI 公式识别模型");
     return;
   }
   formulaProvider.value =
@@ -233,6 +238,31 @@ const ocrDone = ref(false); // 标记是否已识别过（区分空结果与未�
 // AI 渠道下置空，只显示原图；微信 OCR 渠道保留坐标高亮联动。
 const viewerLines = computed(() =>
   textProvider.value === "ai-ocr" ? [] : ocrLines.value,
+);
+
+/**
+ * 整段识别文本：「复制全部 / 发送到翻译 / 识别后自动翻译」共用。
+ * - AI 渠道：直接取可编辑的 aiText（本身已是整段，无需聚合）。
+ * - 微信 OCR 渠道：
+ *   - 聚合开启：取 paraText（识别成功时按段落聚合回填，可在段落视图中编辑，
+ *     复制 / 翻译以编辑后为准）。
+ *   - 聚合关闭：保持逐行换行（旧行为），右侧也仍按行展示置信度明细。
+ */
+const assembledOcrText = computed(() => {
+  if (textProvider.value === "ai-ocr") return aiText.value;
+  if (settings.ocrMergeParagraphs) return paraText.value;
+  return assembleOcrText(ocrLines.value, false);
+});
+
+/**
+ * 聚合段落的编辑/回显状态（仅微信 OCR 渠道、聚合开启时使用）。
+ * - paraText：按段落聚合后的整段文本（段落间单个换行），识别成功时回填；
+ *   右侧以 textarea 形式回显（不再展示行级置信度），可直接编辑纠错。
+ * - 段落数取自编辑后文本的非空行数，随编辑实时更新。
+ */
+const paraText = ref("");
+const paraCount = computed(
+  () => paraText.value.split(/\r?\n/).filter((l) => l.trim()).length,
 );
 
 /**
@@ -372,6 +402,7 @@ function resetTextResult() {
   translateFired.value = false;
   aiEditMode.value = false;
   aiText.value = "";
+  paraText.value = "";
 }
 /** 清空公式模式结果（切渠道 / 换图时调用）。 */
 function resetFormulaResult() {
@@ -425,13 +456,18 @@ function applyOcrLines(lines: OcrLine[]) {
     // 空结果不上抛 text-result，避免清空翻译框
     return;
   }
-  success(`识别完成，共 ${lines.length} 行`);
+  // 聚合开启：按段落聚合回填 paraText（段落视图回显 + 复制 / 翻译共用）。
+  // 仅微信 OCR 渠道需要——AI 渠道的文本走可编辑的 aiText，无需回填。
+  if (settings.ocrMergeParagraphs && textProvider.value !== "ai-ocr") {
+    const paras = aggregateOcrParagraphs(lines);
+    paraText.value = paras.join("\n");
+    success(`识别完成，共 ${paras.length} 段`);
+  } else {
+    success(`识别完成，共 ${lines.length} 行`);
+  }
   // 同步当前识别文本给父组件：供用户手动切到翻译 tab 时带入翻译输入框。
-  // AI 渠道以 aiText 为准（可被用户编辑），微信 OCR 渠道拼装各行文本。
-  const text =
-    textProvider.value === "ai-ocr"
-      ? aiText.value
-      : lines.map((l) => l.text).join("\n");
+  // 取 assembledOcrText（AI 渠道 = 可编辑的 aiText；微信 OCR 渠道按设置聚合段落）。
+  const text = assembledOcrText.value;
   emit("text-result", text);
   // 上抛历史记录：只有真正调识别服务成功才留一笔（命中缓存不会进此分支）
   emit("history", {
@@ -568,11 +604,8 @@ function copyLine(text: string) {
 }
 
 function copyAllText() {
-  // AI 渠道复制编辑后的整段文本；微信 OCR 渠道拼装各行文本。
-  const text =
-    textProvider.value === "ai-ocr"
-      ? aiText.value
-      : ocrLines.value.map((l) => l.text).join("\n");
+  // AI 渠道复制编辑后的整段文本；微信 OCR 渠道按设置装配（聚合段落 / 逐行）
+  const text = assembledOcrText.value;
   if (!text) return;
   window.ztools.copyText(text);
   success("已复制全部文字");
@@ -687,6 +720,17 @@ watch(formulaProvider, () => {
   }
 });
 
+// 聚合段落开关切换：识别结果已在手时即时重建段落文本，
+// 覆盖「识别时开关关闭、中途打开」的场景（关闭方向无需处理，逐行输出现算）。
+watch(
+  () => settings.ocrMergeParagraphs,
+  (on) => {
+    if (on && textProvider.value !== "ai-ocr" && ocrLines.value.length) {
+      paraText.value = assembleOcrText(ocrLines.value, true);
+    }
+  },
+);
+
 onMounted(() => {
   window.addEventListener("paste", onPaste);
   checkNative();
@@ -705,7 +749,7 @@ onActivated(() => {
   window.addEventListener("paste", onPaste);
   checkNative();
   checkLatex();
-  // 重读 AI 渠道配置状态（用户可能在设置页改了模型），与 Translate onMounted 一致。
+  // 重读 AI 渠道配置状态（用户可能在「渠道」页改了模型），与 Translate onMounted 一致。
   refreshProviderStatus();
 });
 
@@ -838,7 +882,7 @@ onUnmounted(() => {
               }"
               :title="
                 !providerConfigured['ai-ocr']
-                  ? '未配置 AI 识图模型，请先在设置中配置'
+                  ? '未配置 AI 识图模型，请先在「渠道」页配置'
                   : textProvider === 'ai-ocr'
                     ? '已启用 AI 识图，点击关闭改用微信 OCR'
                     : 'AI 识图就绪，点击启用'
@@ -880,7 +924,7 @@ onUnmounted(() => {
               }"
               :title="
                 !providerConfigured['ai-latex-ocr']
-                  ? '未配置 AI 公式识别模型，请先在设置中配置'
+                  ? '未配置 AI 公式识别模型，请先在「渠道」页配置'
                   : formulaProvider === 'ai-latex-ocr'
                     ? '已启用 AI 公式识别，点击关闭改用本地引擎'
                     : 'AI 公式识别就绪，点击启用'
@@ -932,8 +976,29 @@ onUnmounted(() => {
               选择图片或截图后自动识别，结果将在此显示
             </div>
             <template v-else>
-              <!-- 微信 OCR：带置信度的行列表，与图上文字双向高亮联动 -->
-              <template v-if="textProvider !== 'ai-ocr'">
+              <!-- 微信 OCR · 聚合开启：按段落回显（textarea 形式，可编辑），不展示行级置信度 -->
+              <div
+                v-if="textProvider !== 'ai-ocr' && settings.ocrMergeParagraphs"
+                class="ocr-result"
+                :class="{ dark: isDark }"
+              >
+                <div class="result-head">
+                  <span class="result-title"
+                    >识别结果（{{ paraCount }} 段）</span
+                  >
+                  <ZButton size="small" @click="copyAllText">复制全部</ZButton>
+                </div>
+                <textarea
+                  class="para-view"
+                  v-model="paraText"
+                  spellcheck="false"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="off"
+                ></textarea>
+              </div>
+              <!-- 微信 OCR · 聚合关闭：带置信度的行列表，与图上文字双向高亮联动 -->
+              <template v-else-if="textProvider !== 'ai-ocr'">
                 <div class="result-head">
                   <span class="result-title"
                     >识别明细（{{ ocrLines.length }} 行）</span
@@ -1459,6 +1524,40 @@ onUnmounted(() => {
 .ai-result.dark .mode-toggle-btn.active {
   background: var(--sub-item-active-bg, rgba(255, 255, 255, 0.08));
   box-shadow: none;
+}
+
+/* 微信 OCR 聚合段落视图（textarea 形式回显，可编辑） */
+.ocr-result {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.para-view {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 12px;
+  background: var(--code-bg, #f5f5f5);
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #e5e6eb);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  resize: none;
+  color: var(--text-color, #333);
+  outline: none;
+}
+
+/* scoped 下 :global 失效，用 .dark 类驱动暗色段落视图 */
+.ocr-result.dark .para-view {
+  background: var(--code-bg, #2a2a2a);
+  color: var(--text-color, #f3f4f6);
+  border-color: var(--border-color, #374151);
 }
 
 /* AI 展示模式行列表：撑满并内部滚动 */

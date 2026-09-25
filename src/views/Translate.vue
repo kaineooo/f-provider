@@ -64,7 +64,7 @@ const providerFnNames: Record<
 }
 
 // 读取各 provider 配置状态，用于在 provider 选择器旁标注「已配置 / 免授权」。
-// AI 翻译复用宿主已配置的 AI 模型、无需密钥，始终视为可用（与设置页一致）。
+// AI 翻译复用宿主已配置的 AI 模型、无需密钥，始终视为可用（与「渠道」页一致）。
 const providerConfigured = ref<Record<ProviderName, boolean>>({
   baidu: false,
   google: true,

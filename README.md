@@ -26,7 +26,9 @@ _微信 OCR 离线识别 · LaTeX 公式识别 · 百度 / 谷歌 / 有道 / 微
 - 📸 **截图识别** - 进入即自动截屏框选区域，识别出文字并可视化悬浮在原图上，可点选复制
 - 🖼️ **图片识别** - 拖入 / 选择图片即识别，文字模式用 canvas 绘图 + 透明文字层，公式模式用 KaTeX 渲染；支持全屏缩放拖动
 - 🔁 **自动翻译** - 原文变化 1s 自动重译，支持语言互换、自动推断目标语言
-- 📜 **历史记录** - OCR / 翻译结果按条目落盘到 `ztools.dbStorage`，管理页「历史记录」tab 可回看复制
+- 🧮 **段落聚合** - OCR 按版面几何把同一段落的多行合并为整段再复制 / 翻译，避免硬换行切断句子（可在设置页开关）
+- 📜 **历史记录** - OCR / 翻译结果按条目落盘到 `ztools.dbStorage`，管理页「历史记录」tab 可回看复制；条数上限与存留天数可设
+- ⚙️ **插件设置** - 底部导航常驻、OCR 结果聚合段落、历史记录条数 / 存留天数，改动即时生效
 - 🔒 **凭据安全** - 敏感凭据按插件命名空间隔离存入 `ztools.dbStorage`
 - 🌍 **跨平台** - 翻译全平台可用；微信 OCR 与 LaTeX 公式识别覆盖 Windows + macOS（Linux 仅翻译）
 
@@ -112,7 +114,7 @@ await ztools.providers.invokeProvider('baidu', { text: 'hello', from: 'en', to: 
 | 微软 | ✅ | 鉴权方案（Edge Token 或 Signature） |
 | 谷歌 | ❌ | 官方 `translate.googleapis.com` 端点（`client=gtx`），无需凭据；国内需走系统代理 |
 
-凭据在「ZTools 提供商管理」入口（feature `code: manage`）侧边栏的「设置」子页填写并保存。敏感字段统一存入 `ztools.dbStorage`（按插件命名空间隔离），键名 `translate.<provider>`。
+凭据在「ZTools 提供商管理」入口（feature `code: manage`）底部「渠道」页填写并保存。敏感字段统一存入 `ztools.dbStorage`（按插件命名空间隔离），键名 `translate.<provider>`。
 
 ## 🧩 功能详解
 
@@ -122,18 +124,19 @@ await ztools.providers.invokeProvider('baidu', { text: 'hello', from: 'en', to: 
 
 通过不同类型 cmd 承载多种入口，全部进入同一管理页，根据进入方式自动切到对应 tab：
 
-- **关键词进入**（`text` 型 cmd `ZTools 提供商`）：可被搜索（支持拼音），默认打开「设置」tab
+- **关键词进入**（`text` 型 cmd `ZTools 提供商`）：可被搜索（支持拼音），默认打开「渠道」tab
 - **图片进入**（`img` / `files` 匹配型 cmd `识别图片文字`）：拖入或选择图片文件后，自动切到「OCR 识别」tab 的**文字**模式，展示原图预览并用该图片跑微信 OCR，展示带坐标的逐行结果
 - **文本翻译进入**（`over` 型 cmd `翻译`，`minLength: 1`）：在主搜索框输入任意文本即可命中，进入后自动切到「翻译」tab，预填该文本并触发一次翻译
 
 管理页底部悬浮导航（无分组，平铺）：
 
-- **设置** - 微信 OCR 引擎 + LaTeX 引擎 + 翻译服务卡片网格（凭据 / 鉴权方案 / 引擎下载）
+- **渠道** - 微信 OCR 引擎 + LaTeX 引擎 + 翻译服务卡片网格（凭据 / 鉴权方案 / 引擎下载）
 - **OCR 识别** - 同一页顶部切「文字 / 公式」两种模式，保留同一张图片与各自结果互不干扰
   - 文字模式：选图 / 拖拽 / 粘贴识别，画布绘制原图 + 透明文字层可点选复制；超级面板选图会先转 data URI 展示原图
   - 公式模式：`<img>` 预览原图 + 右侧 KaTeX 渲染 + LaTeX 源码 + 三种复制形式（源码 / 渲染文本 / 图片）
 - **翻译** - 单 provider 实用翻译器，原文/译文左右结构、原文可编辑、顶部「自动翻译」开关——开启后原文变化 1s 自动重译，支持语言互换、自动推断目标语言
 - **历史记录** - OCR 与翻译的结果条目按时间倒序列出，点击复用 / 复制；落盘到 `ztools.dbStorage`，切 tab 保留
+- **设置** - 插件行为偏好（底部导航常驻 / OCR 结果聚合段落 / 历史记录条数与存留天数），改动即时保存到 `plugin.settings` 并立刻生效
 
 > 引擎未就绪时，「OCR 识别」页会渲染下载卡片（可下载自救），下载就绪后自动补一次当前模式的识别；翻译相关子页全平台可用。
 
@@ -237,7 +240,7 @@ f-provider/
 | LaTeX 公式识别 | ✅ | ✅ | ❌ |
 | 截图识别公式 | ✅ | ✅ | ❌ |
 | 翻译（百度/谷歌/有道/微软） | ✅ | ✅ | ✅ |
-| 历史记录 / 设置 / 代码翻译 | ✅ | ✅ | ✅ |
+| 历史记录 / 渠道 / 设置 / 代码翻译 | ✅ | ✅ | ✅ |
 
 - **微信 OCR** 覆盖 Windows x64 与 macOS（Apple Silicon 原生编译的 `.node`，`libwxocr.dylib` 为 universal）。运行时文件随插件 GitHub Release 下载，**不读取本机已装的微信**。`screen-ocr` / `screen-latex` feature 用 `platform: ["win32", "darwin"]` 标注；`manage` feature 不限制平台，Linux 下可打开但「OCR 识别」页会显示引擎未就绪
 - **LaTeX 公式识别** 基于 onnxruntime-node，Win/Mac 各有 per-platform 的 ORT 二进制 + 共享模型 zip，同样走 Release 资产下载
