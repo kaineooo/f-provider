@@ -837,8 +837,17 @@ window.services = {
       })
       if (r.status !== 0) {
         const detail = (r.stderr || r.stdout || '').toString().trim()
-        throw new Error('解压失败' + (detail ? ': ' + detail : ''))
+        // Windows Compress-Archive 打的 zip 条目用反斜杠作路径分隔符，unzip 会打
+        // 「appears to use backslashes」warning 并以状态码 1 退出，但内容已按目录
+        // 层级成功解出——放行，否则 latex-models.zip 在 macOS 上必然"下载失败"。
+        if (!/appears to use backslashes as path separators/.test(detail)) {
+          throw new Error('解压失败' + (detail ? ': ' + detail : ''))
+        }
       }
+      // 另一些写入器/解压器组合（NTFS/Unix 宿主标记的反斜杠条目）会把条目解成
+      // 文件名带字面反斜杠的扁平文件（如 "models\encoder.onnx"），统一归位成
+      // 真实目录层级；unzip 已正常按层级解出时此步是空操作。
+      this._normalizeBackslashNames(destDir)
       // 解压出的二进制带下载来源的 quarantine 属性时，dlopen 会被 Gatekeeper 拦截。
       // 对整个 destDir 递归去除，兼容 native/、onnxruntime-node/、models/ 等任意顶层目录。
       spawnSync('xattr', ['-dr', 'com.apple.quarantine', destDir], {
@@ -860,6 +869,56 @@ window.services = {
       const detail = (r.stderr || r.stdout || '').toString().trim()
       throw new Error('解压失败' + (detail ? ': ' + detail : ''))
     }
+  },
+
+  // 把解压结果里带字面反斜杠的扁平条目名归位为真实目录层级（幂等）。
+  // 背景：Windows 写入器（Compress-Archive 等）打的 zip 条目用反斜杠分隔，
+  // Apple unzip 对 DOS 宿主标记的包会告警但按层级正常解出；对其他宿主标记则
+  // 解成 "models\encoder.onnx" 这类扁平名（目录条目 "models\" 则解成空文件）。
+  // 本函数只处理扁平名的情况，正常解压结果是空操作。仅 macOS 分支调用。
+  _normalizeBackslashNames(root) {
+    const walk = (dir) => {
+      let names = []
+      try { names = fs.readdirSync(dir) } catch (_) { return }
+      // 先递归子目录、再处理本层：移动怪名目录前其内容已先行归位
+      for (const name of names) {
+        try {
+          if (fs.lstatSync(path.join(dir, name)).isDirectory()) {
+            walk(path.join(dir, name))
+          }
+        } catch (_) {}
+      }
+      // 目录标记条目（"models\"）最后处理：此刻真实目录多半已由文件条目归位建立
+      const ordered = [...names].sort(
+        (a, b) => Number(a.endsWith('\\')) - Number(b.endsWith('\\'))
+      )
+      for (const name of ordered) {
+        if (!name.includes('\\')) continue
+        const src = path.join(dir, name)
+        // 目标必须去掉尾部分隔符：path.join 会保留 "models/" 的尾斜杠，
+        // 而带尾斜杠的目标会让 rename 对文件源报 ENOENT
+        const target = path
+          .join(dir, name.replace(/\\/g, '/'))
+          .replace(/\/+$/, '')
+        try {
+          if (fs.existsSync(target)) {
+            // 真实层级已存在（同一压缩包的内容已按层级解出），
+            // 怪名条目只是重复/空壳，清掉
+            fs.rmSync(src, { recursive: true, force: true })
+          } else {
+            fs.mkdirSync(path.dirname(target), { recursive: true })
+            if (fs.lstatSync(src).isDirectory()) {
+              fs.renameSync(src, target)
+            } else {
+              // "models\" 目录标记被解成了空文件：补建真实目录并清掉标记
+              fs.mkdirSync(target, { recursive: true })
+              fs.rmSync(src, { force: true })
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    walk(root)
   },
 
   // 主流程：下载平台 native zip + 校验 + 解压（临时目录）+ 拷贝到数据目录 + 复检。

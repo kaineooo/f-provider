@@ -89,7 +89,12 @@ function unzip(zipPath, destDir) {
   }
   if (r.status !== 0) {
     const detail = (r.stderr || r.stdout || '').toString().trim()
-    throw new Error('解压失败 ' + zipPath + (detail ? ': ' + detail : ''))
+    // 旧版 Release 产物 latex-models.zip 由 Windows Compress-Archive 打包（反斜杠
+    // 条目），macOS unzip 会报 backslash warning 并以状态码 1 退出，但内容已按
+    // 层级解出——放行，仅当是真实错误时才中断。
+    if (!/appears to use backslashes as path separators/.test(detail)) {
+      throw new Error('解压失败 ' + zipPath + (detail ? ': ' + detail : ''))
+    }
   }
 }
 

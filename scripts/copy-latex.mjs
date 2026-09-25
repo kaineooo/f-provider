@@ -104,11 +104,12 @@ function zipDir(parentDir, baseName, zipPath, label) {
       shell: false
     })
   } else {
-    // Windows：Compress-Archive 指向目录本身，保留顶级 baseName/ 目录
-    const src = join(parentDir, baseName).replace(/'/g, "''")
-    const dst = zipPath.replace(/'/g, "''")
-    const ps = `Compress-Archive -Path '${src}' -DestinationPath '${dst}' -Force`
-    r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+    // Windows：用系统自带 bsdtar（System32\tar.exe，Win10 1803+）打 zip，
+    // 条目路径统一正斜杠。Compress-Archive（PS5.1/.NET Framework）写的是
+    // 反斜杠条目，macOS unzip 会告警并以状态码 1 退出，导致插件端
+    // latex-models.zip「下载失败：解压失败」，必须避开。
+    r = spawnSync('tar', ['-a', '-c', '-f', zipPath, baseName], {
+      cwd: parentDir,
       encoding: 'utf8',
       shell: false
     })
