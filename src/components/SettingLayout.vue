@@ -42,11 +42,6 @@ const props = withDefaults(
     /** 版本号（保留兼容，底部栏不渲染） */
     version?: string | null
     /**
-     * 悬浮导航栏水平对齐：默认居中。
-     * 'left' 用于公式识别模式——避免居中遮挡右下角的复制按钮组。
-     */
-    dockAlign?: 'center' | 'left'
-    /**
      * 悬浮导航栏常驻（插件设置 dockAlwaysVisible）。
      * true：始终显示，无需鼠标靠近底部；false：鼠标进入底部触发区才滑入。
      */
@@ -55,7 +50,6 @@ const props = withDefaults(
   {
     title: '',
     version: null,
-    dockAlign: 'center',
     dockAlwaysVisible: false
   }
 )
@@ -144,11 +138,9 @@ function selectChild(child: NavChild) {
     @mousemove="onContentMove"
     @mouseleave="onContentLeave"
   >
-    <!-- 内容区：底部预留少量 padding 防止悬浮栏遮挡关键内容 -->
-    <main
-      class="content"
-      :class="{ 'has-sub': showSubBar, 'has-dock': dockAlwaysVisible }"
-    >
+    <!-- 内容区：始终按底部悬浮栏实际高度预留空间（等同常驻时的留白），
+         常驻时栏体常显、非常驻时唤出均不遮挡底部内容，各页无需自行补偿 -->
+    <main class="content" :class="{ 'has-sub': showSubBar }">
       <slot />
     </main>
 
@@ -157,7 +149,6 @@ function selectChild(child: NavChild) {
       <nav
         v-show="dockShow"
         class="dock"
-        :class="{ 'dock-left': dockAlign === 'left' }"
         role="tablist"
         aria-label="主导航"
         @mouseenter="onDockEnter"
@@ -234,23 +225,13 @@ function selectChild(child: NavChild) {
   height: 100%;
   overflow-y: auto;
   box-sizing: border-box;
-  /* 悬浮栏收起时几乎不占位，但仍留少量呼吸空间 */
-  padding-bottom: 12px;
-}
-
-/* 激活主组带子切换条时，多留一点 */
-.content.has-sub {
-  padding-bottom: 16px;
-}
-
-/* 悬浮栏常驻时：按悬浮栏实际高度预留，避免遮挡各页底部内容
-   （满高布局的子页按 padding 后的内容高计算 100%，也会相应让出空间）。
-   与 .has-sub 同为双类选择器，靠源序在后覆盖上面的 16px。 */
-.content.has-dock {
+  /* 始终按底部悬浮栏高度预留（60px ≈ 栏体高度 + 8px 底边距）：
+     满高布局的子页按 padding 后的内容高计算 100%，也会相应让出空间 */
   padding-bottom: 60px;
 }
 
-.content.has-dock.has-sub {
+/* 激活主组带子切换条时，再多留子条高度 */
+.content.has-sub {
   padding-bottom: 84px;
 }
 
@@ -275,11 +256,6 @@ function selectChild(child: NavChild) {
   border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
   box-sizing: border-box;
-  /* 居中↔左对齐切换（如公式→设置）的位置过渡；进入/离开过渡由下方
-     .dock-slide-enter-active 覆盖，二者不冲突（后者源序在后、同特异性优先） */
-  transition:
-    left 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ── 进入/离开过渡 ── */
@@ -292,17 +268,6 @@ function selectChild(child: NavChild) {
 .dock-slide-leave-to {
   opacity: 0;
   transform: translate(-50%, 12px);
-}
-
-/* 左对齐态：去掉水平居中偏移，进入/离开过渡也同步改为无水平位移 */
-.dock.dock-left {
-  left: 8px;
-  transform: translateX(0);
-}
-
-.dock.dock-left.dock-slide-enter-from,
-.dock.dock-left.dock-slide-leave-to {
-  transform: translate(0, 12px);
 }
 
 /* 子项切换条（segmented control 风格） */

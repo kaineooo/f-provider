@@ -90,8 +90,8 @@ declare global {
   }
 
   // ─── 历史记录 ─────────────────────────────────────────────────────────
-  /** 历史记录的类型：OCR 文字 / OCR 公式 / 翻译。 */
-  type HistoryKind = 'ocr-text' | 'ocr-formula' | 'translate'
+  /** 历史记录的类型：OCR 文字 / OCR 公式 / OCR 表格 / 翻译。 */
+  type HistoryKind = 'ocr-text' | 'ocr-formula' | 'ocr-table' | 'translate'
 
   /**
    * 历史记录条目。由 Recognize / Translate 在完成识别/翻译后上抛给 Manage，
@@ -118,6 +118,7 @@ declare global {
     payload:
       | { kind: 'ocr-text'; imageSrc: string; lines: OcrLine[] }
       | { kind: 'ocr-formula'; imageSrc: string; latex: string }
+      | { kind: 'ocr-table'; imageSrc: string; markdown: string }
       | {
           kind: 'translate'
           source: string
@@ -181,18 +182,19 @@ declare global {
     'ai-translation': { model: string; systemPrompt: string }
   }
 
-  /** AI OCR provider 的设置（复用宿主 AI 视觉模型，不存密钥）。 */
+  /**
+   * AI OCR provider 的设置（复用宿主 AI 视觉模型，不存密钥）。
+   * 识图 / 公式 / 表格三种识别共用同一个模型（统一渠道），提示词内置不可改。
+   */
   interface OcrSettingsMap {
-    'ai-ocr': { model: string; systemPrompt: string }
-    /** AI 公式识别：独立 model + systemPrompt（prompt 要求输出 LaTeX 源码）。 */
-    'ai-latex-ocr': { model: string; systemPrompt: string }
+    'ai-ocr': { model: string }
   }
 
   /** 图床类型联合：后续新增图床在此扩展。 */
   type ImageHostType = 'img-scdn'
 
   /**
-   * 图床设置（ai-ocr / ai-latex-ocr 共用）。AI 识图默认先把图片上传图床，
+   * 图床设置（AI 识别共用）。AI 识图默认先把图片上传图床，
    * 拿到可访问 URL 再发给视觉模型，省 token 且避免大图 base64 截断；
    * 关闭或上传失败自动回退 base64 data URI 直传。
    */
@@ -315,7 +317,7 @@ declare global {
     getOcrSettings: <P extends keyof OcrSettingsMap>(provider: P) => OcrSettingsMap[P]
     /** 写某 OCR provider 的设置。 */
     setOcrSettings: <P extends keyof OcrSettingsMap>(provider: P, data: OcrSettingsMap[P]) => void
-    /** 读图床设置（ai-ocr / ai-latex-ocr 共用，合并默认值 enabled=true）。 */
+    /** 读图床设置（AI 识别共用，合并默认值 enabled=true）。 */
     getImageHostSettings: () => ImageHostSettings
     /** 写图床设置。 */
     setImageHostSettings: (data: ImageHostSettings) => void
@@ -327,10 +329,15 @@ declare global {
     uploadImage: (image: string) => Promise<string | null>
     /** AI 翻译（走宿主 ztools.ai，model 留空走宿主默认模型）。 */
     translateAi: (text: string, from?: string, to?: string) => Promise<TranslateProviderOutput>
-    /** AI 识图（走宿主 ztools.ai，需选择支持视觉的模型）。 */
+    /**
+     * AI 识别（走宿主 ztools.ai，需选择支持视觉的模型；提示词内置）。
+     * 识图 / 公式 / 表格三种识别共用同一个模型，仅提示词不同。
+     */
     ocrAi: (image: string, lang?: string) => Promise<OcrProviderOutput>
-    /** AI 公式识别（走宿主 ztools.ai，需选择支持视觉的模型）。返回 LaTeX 源码。 */
+    /** AI 公式识别（走宿主 ztools.ai，与 ocrAi 同模型）。返回 LaTeX 源码。 */
     latexAi: (image: string) => Promise<{ latex: string }>
+    /** AI 表格识别（走宿主 ztools.ai，与 ocrAi 同模型）。返回 Markdown 表格源码。 */
+    tableAi: (image: string) => Promise<{ table: string }>
   }
 
   interface Window {

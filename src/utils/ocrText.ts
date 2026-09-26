@@ -79,8 +79,8 @@ interface GeomStats {
   medianWidth: number
 }
 
-/** 取中位数（入参需已升序）；空数组返回 0。 */
-function median(sorted: number[]): number {
+/** 取中位数（入参需已升序）；空数组返回 0。（ocrTable 的表格聚类复用） */
+export function median(sorted: number[]): number {
   if (!sorted.length) return 0
   const mid = sorted.length >> 1
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
@@ -115,7 +115,7 @@ function xOverlapRatio(a: OcrLine, b: OcrLine): number {
  * @param a 已累积的段落文本。
  * @param b 追加的一行文本（已 trim）。
  */
-function joinInline(a: string, b: string): string {
+export function joinInline(a: string, b: string): string {
   if (!a) return b
   if (!b) return a
   const last = a[a.length - 1]

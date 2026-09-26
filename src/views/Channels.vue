@@ -122,11 +122,11 @@ function handleLatexRemove(): void {
 const baidu = ref({ appID: '', appKey: '' })
 const youdao = ref({ appKey: '', appSecret: '' })
 
-// AI 翻译 / AI OCR：复用宿主已配置的 AI 模型，此处仅存模型选择与 prompt 模板（不存密钥）。
+// AI 翻译：复用宿主已配置的 AI 模型，仅存模型选择与 prompt 模板（不存密钥）。
+// AI 识别：统一视觉模型设置，识图 / 公式 / 表格共用同一个模型；提示词内置，不提供编辑。
 const aiTranslation = ref({ model: '', systemPrompt: '' })
-const aiOcr = ref({ model: '', systemPrompt: '' })
-const aiLatexOcr = ref({ model: '', systemPrompt: '' })
-// 图床设置（ai-ocr / ai-latex-ocr 共用）：默认开启，关闭则 AI 识图回退 base64 直传。
+const aiOcr = ref({ model: '' })
+// 图床设置（AI 识别共用）：默认开启，关闭则 AI 识别回退 base64 直传。
 const imageHost = ref<ImageHostSettings>({ enabled: true, type: 'img-scdn' })
 // 宿主已配置的 AI 模型列表（ztools.allAiModels()），用于模型下拉。
 const aiModels = ref<{ id: string; label: string }[]>([])
@@ -147,13 +147,11 @@ async function loadSettings(): Promise<void> {
     baidu.value = { appID: b.appID || '', appKey: b.appKey || '' }
     const y = window.services.getTranslateSettings('youdao')
     youdao.value = { appKey: y.appKey || '', appSecret: y.appSecret || '' }
-    // AI 翻译 / AI OCR 配置回填
+    // AI 翻译 / AI 识别配置回填
     const at = window.services.getTranslateSettings('ai-translation')
     aiTranslation.value = { model: at.model || '', systemPrompt: at.systemPrompt || '' }
     const ao = window.services.getOcrSettings('ai-ocr')
-    aiOcr.value = { model: ao.model || '', systemPrompt: ao.systemPrompt || '' }
-    const alo = window.services.getOcrSettings('ai-latex-ocr')
-    aiLatexOcr.value = { model: alo.model || '', systemPrompt: alo.systemPrompt || '' }
+    aiOcr.value = { model: ao.model || '' }
     // 图床配置回填（enabled 默认 true：旧数据无该 key 时兜底为开启）
     const ih = window.services.getImageHostSettings()
     imageHost.value = {
@@ -183,7 +181,6 @@ async function saveProvider(
     | 'microsoft'
     | 'ai-translation'
     | 'ai-ocr'
-    | 'ai-latex-ocr'
     | 'image-host'
 ): Promise<void> {
   saving.value = true
@@ -193,9 +190,7 @@ async function saveProvider(
       window.services.setTranslateSettings('youdao', { ...youdao.value })
     else if (p === 'ai-translation')
       window.services.setTranslateSettings('ai-translation', { ...aiTranslation.value })
-    else if (p === 'ai-ocr') window.services.setOcrSettings('ai-ocr', { ...aiOcr.value })
-    else if (p === 'ai-latex-ocr')
-      window.services.setOcrSettings('ai-latex-ocr', { ...aiLatexOcr.value })
+    else if (p === 'ai-ocr') window.services.setOcrSettings('ai-ocr', { model: aiOcr.value.model })
     else if (p === 'image-host')
       window.services.setImageHostSettings({ ...imageHost.value })
     success('已保存')
@@ -215,7 +210,6 @@ type ProviderKey =
   | 'microsoft'
   | 'ai-translation'
   | 'ai-ocr'
-  | 'ai-latex-ocr'
   | 'image-host'
 
 interface ProviderMeta {
@@ -255,18 +249,13 @@ const providers: ProviderMeta[] = [
   },
   {
     key: 'ai-ocr',
-    name: 'AI 识图',
-    desc: '基于视觉模型识别图片文字，需选择支持视觉的模型。'
-  },
-  {
-    key: 'ai-latex-ocr',
-    name: 'AI 公式识别',
-    desc: '基于视觉模型识别数学公式为 LaTeX，需选择支持视觉的模型。'
+    name: 'AI 识别',
+    desc: '统一视觉模型：识别图片文字 / 数学公式 / 表格，需选择支持视觉的模型，提示词内置。'
   },
   {
     key: 'image-host',
     name: '图床',
-    desc: 'AI 识图/公式识别的图片来源：先上传图床再发 AI（省 token、防截断），默认开启，失败自动回退直传。',
+    desc: 'AI 识别的图片来源：先上传图床再发 AI（省 token、防截断），默认开启，失败自动回退直传。',
     docsUrl: 'https://img.scdn.io/api_docs.php'
   }
 ]
@@ -281,7 +270,6 @@ const configured = computed(
       microsoft: true,
       'ai-translation': true, // 模型可留空走宿主默认，始终视为可用
       'ai-ocr': !!aiOcr.value.model,
-      'ai-latex-ocr': !!aiLatexOcr.value.model,
       'image-host': imageHost.value.enabled
     }) as Record<ProviderKey, boolean>
 )
@@ -597,58 +585,27 @@ onMounted(() => {
             <p class="field-hint">无需密钥：复用 ZTools「AI 模型」中已配置的模型与 API Key。</p>
           </template>
 
-          <!-- AI 识图（走宿主 ztools.ai，需支持视觉的模型） -->
+          <!-- AI 识别（统一视觉模型：识图 / 公式 / 表格共用，提示词内置） -->
           <template v-else-if="activeProvider.key === 'ai-ocr'">
             <div class="field">
-              <label>模型（须选支持视觉的模型）</label>
+              <label>视觉模型（识图 / 公式 / 表格共用）</label>
               <ZSelect
                 v-model="aiOcr.model"
                 :options="aiModelOptions"
                 placeholder="选择支持视觉的模型"
               />
             </div>
-            <div class="field">
-              <label>系统提示词</label>
-              <textarea
-                v-model="aiOcr.systemPrompt"
-                class="ai-textarea"
-                rows="4"
-                placeholder="如：识别图片中的所有文字，按原文逐行输出，只输出文字。"
-              ></textarea>
-            </div>
             <p class="field-hint">纯文本模型无法识图，请选择如 GPT-4o 等支持视觉输入的模型。</p>
           </template>
 
-          <!-- AI 公式识别（走宿主 ztools.ai，需支持视觉的模型） -->
-          <template v-else-if="activeProvider.key === 'ai-latex-ocr'">
-            <div class="field">
-              <label>模型（须选支持视觉的模型）</label>
-              <ZSelect
-                v-model="aiLatexOcr.model"
-                :options="aiModelOptions"
-                placeholder="选择支持视觉的模型"
-              />
-            </div>
-            <div class="field">
-              <label>系统提示词</label>
-              <textarea
-                v-model="aiLatexOcr.systemPrompt"
-                class="ai-textarea"
-                rows="4"
-                placeholder="如：识别图片中的数学公式并输出对应的 LaTeX 源码，只输出 LaTeX 代码。"
-              ></textarea>
-            </div>
-            <p class="field-hint">提示词应要求只输出 LaTeX 源码、不加 $ 包裹；AI 误加的围栏会被自动剔除。</p>
-          </template>
-
-          <!-- 图床（ai-ocr / ai-latex-ocr 共用的图片上传通道） -->
+          <!-- 图床（AI 识别共用的图片上传通道） -->
           <template v-else-if="activeProvider.key === 'image-host'">
             <div class="field">
               <label class="switch-field">
                 <input type="checkbox" v-model="imageHost.enabled" />
                 <span>启用图床上传</span>
               </label>
-              <p class="field-hint">关闭后 AI 识图改用 base64 直传 vision 模型（大图易超 token / 触发截断）。</p>
+              <p class="field-hint">关闭后 AI 识别改用 base64 直传 vision 模型（大图易超 token / 触发截断）。</p>
             </div>
             <div class="field" v-if="imageHost.enabled">
               <label>图床类型</label>
@@ -669,7 +626,7 @@ onMounted(() => {
             type="primary"
             size="small"
             :loading="saving"
-            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'ai-translation' | 'ai-ocr' | 'ai-latex-ocr' | 'image-host')"
+            @click="saveProvider(activeProvider.key as 'baidu' | 'youdao' | 'ai-translation' | 'ai-ocr' | 'image-host')"
           >
             保存
           </ZButton>

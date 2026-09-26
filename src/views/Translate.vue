@@ -428,7 +428,8 @@ onUnmounted(() => {
 
 <style scoped>
 .tr-wrap {
-  padding: 18px 24px;
+  /* 底部留白由 SettingLayout 内容区统一预留，这里不再重复 */
+  padding: 18px 24px 0;
   display: flex;
   flex-direction: column;
   gap: 14px;

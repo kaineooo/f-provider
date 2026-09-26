@@ -10,22 +10,35 @@ import { useLatexEngine } from "../composables/useLatexEngine";
 import { usePluginSettings } from "../composables/usePluginSettings";
 import { useSegmentIndicator } from "../composables/useSegmentIndicator";
 import { aggregateOcrParagraphs, assembleOcrText } from "../utils/ocrText";
+import {
+  buildMarkdownTable,
+  markdownTableToHtml,
+  markdownTableToTsv,
+  parseMarkdownTable,
+} from "../utils/markdownTable";
+import { splitOcrRegions } from "../utils/ocrTable";
 
 /**
- * 识别子页（合并文字 OCR 与公式识别）：左右结构。
+ * 识别子页（文字 OCR / 公式识别 / 表格识别三合一）：左右结构。
  *
  * 左侧：图片舞台（拖拽/粘贴/选图）。
  *   - 文字模式：复用 OcrImageViewer（canvas 绘图 + 透明文字层 + 全屏预览），
  *     通过 hideResult 隐藏其内置列表，改由右侧统一渲染。
- *   - 公式模式：普通 <img> 预览。
+ *   - 公式 / 表格模式：普通 <img> 预览。
  * 右侧：结果面板。
- *   - 顶部：模式切换（文字 / 公式）+ 引擎状态标签 + 操作按钮。
+ *   - 顶部：模式切换（文字 / 公式 / 表格）+ 独立 AI 开关 + 引擎状态标签 + 操作按钮。
  *   - 文字：聚合开启时按段落 textarea 回显（可编辑、无置信度）；
  *     关闭时为识别行列表，与左侧图上文字双向高亮联动，点击复制。
  *   - 公式：KaTeX 渲染预览 + LaTeX 源码 + 三种复制形式。
+ *   - 表格：AI 渠道输出 Markdown；本机引擎渠道对识别行做几何聚类恢复
+ *     table / row / cell 后序列化为 Markdown，两渠道共用表格预览 +
+ *     复制为表格（TSV）/ 复制为 md / 复制 HTML。
  *
+ * 渠道：AI 统一视觉模型（识图 / 公式 / 表格共用同一模型，提示词内置），由模式切换条
+ * 右侧的独立「AI」开关控制渠道：开启走 AI，关闭走本机引擎（文字 / 表格 = 微信 OCR，
+ * 公式 = 本地 LaTeX 引擎；表格模式本机渠道对识别行做几何聚类恢复表格结构）。
  * 切换模式时保留同一张图片与各自的识别结果（互不干扰），可对同一图片
- * 分别进行文字识别与公式识别。切换到某模式时自动触发一次识别；若该模式已
+ * 分别进行识别。切换到某模式时自动触发一次识别；若该模式已
  * 有缓存结果则直接展示，不重复识别。引擎未就绪期间选图，模型下载完成后
  * 自动补识别当前模式。
  */
@@ -35,7 +48,7 @@ const props = withDefaults(
     /** 进入时预填的待识别图片（data URI 或本地 path）。 */
     initialImage?: string;
     /** 初始模式（由父组件根据入口 action.code 决定）。 */
-    initialMode?: "text" | "formula";
+    initialMode?: "text" | "formula" | "table";
     /**
      * 进入即自动截屏（screen-ocr / screen-latex feature）。
      * 为 true 时，组件挂载后引擎就绪即自动调系统截图；引擎未就绪则等下载完成后
@@ -57,15 +70,10 @@ const props = withDefaults(
 const { isDark } = useColorScheme();
 
 /**
- * 模式变化时上报父组件：公式模式下底部悬浮导航栏会移到左下角，
- * 避免遮挡右下角的三个复制按钮（见 SettingLayout 的 dockAlign）。
- * immediate：组件每次按 :key 重建时同步当前模式，保证 dock 位置正确。
- *
  * 识别成功后上抛 history 事件：由 Manage 统一写入历史记录单例（dbStorage），
  * 不在子组件内直接依赖 dbStorage。
  */
 const emit = defineEmits<{
-  (e: "mode-change", mode: "text" | "formula"): void;
   (e: "history", item: HistoryEmitItem): void;
   (e: "translate", text: string): void;
   /**
@@ -83,121 +91,86 @@ const { latexReady, checkLatex } = useLatexEngine();
 // 插件行为设置：OCR 结果聚合段落开关（见下方 assembledOcrText）
 const { settings } = usePluginSettings();
 
-// ─── 渠道选择（文字：微信 OCR / AI 识图；公式：本地引擎 / AI 公式识别）─────
-// 模式按钮右侧内嵌 sparkle 图标作为 AI 渠道开关：高亮=已启用 AI，点击在
-// AI / 非 AI 渠道间切换；未配置 AI 模型时置灰不可点。dbStorage 持久化上次渠道。
-// AI 渠道走宿主 ztools.ai 视觉模型，不依赖本机引擎（engineReady 视为就绪）；
-// 返回整段文本无坐标，文字渠道下图片叠层隐藏（viewerLines 传空，见下）。
+// ─── AI 渠道开关（统一视觉模型：识图 / 公式 / 表格共用）─────────────────
+// 模式切换条右侧的独立「AI」开关：开启后走宿主 AI 视觉模型，
+// 关闭则用本机引擎（微信 OCR / 本地 LaTeX 引擎；表格模式对识别行做几何聚类）。
+// 统一视觉模型在「渠道」页「AI 识别」中配置（提示词内置）；开关状态持久化到 dbStorage。
 type TextProviderName = "ocr" | "ai-ocr";
 type FormulaProviderName = "latex" | "ai-latex-ocr";
 
-const textProviderLabels: Record<TextProviderName, string> = {
-  ocr: "微信 OCR",
-  "ai-ocr": "AI 识图",
-};
-const formulaProviderLabels: Record<FormulaProviderName, string> = {
-  latex: "本地引擎",
-  "ai-latex-ocr": "AI 公式识别",
-};
-
-// AI 渠道配置状态（是否已选模型）；微信 OCR / 本地引擎恒可用。
-const providerConfigured = ref<Record<"ai-ocr" | "ai-latex-ocr", boolean>>({
-  "ai-ocr": false,
-  "ai-latex-ocr": false,
-});
+// AI 统一模型是否已配置（「渠道」页「AI 识别」中选了视觉模型）；本机引擎恒可用。
+const aiModelConfigured = ref(false);
 function refreshProviderStatus() {
   try {
     const ao = window.services.getOcrSettings("ai-ocr");
-    const alo = window.services.getOcrSettings("ai-latex-ocr");
-    providerConfigured.value = {
-      "ai-ocr": !!ao.model,
-      "ai-latex-ocr": !!alo.model,
-    };
+    aiModelConfigured.value = !!ao.model;
   } catch (_) {
     /* preload 异常：保持默认，不阻塞 */
   }
 }
 
-// 上次使用的渠道持久化（dbStorage）：切渠道后留存，下次进入自动复用；
-// 失效（AI 渠道未配模型）时回落默认（微信 OCR / 本地引擎）。
-const LAST_TEXT_PROVIDER_KEY = "ocr.textProvider";
-const LAST_FORMULA_PROVIDER_KEY = "ocr.formulaProvider";
-function loadLastTextProvider(): TextProviderName | null {
+// AI 开关持久化（dbStorage key: ocr.aiEnabled）。
+// 旧版本按模式分渠道存（ocr.textProvider / ocr.formulaProvider）：
+// 任一模式上次用了 AI 则迁移为默认开启，避免升级后 AI 偏好丢失。
+const AI_ENABLED_KEY = "ocr.aiEnabled";
+function loadAiEnabled(): boolean {
   try {
-    const v = window.ztools.dbStorage.getItem<string>(LAST_TEXT_PROVIDER_KEY);
-    if (v && v in textProviderLabels) {
-      const p = v as TextProviderName;
-      if (p === "ocr" || providerConfigured.value["ai-ocr"]) return p;
-    }
+    const v = window.ztools.dbStorage.getItem(AI_ENABLED_KEY);
+    if (typeof v === "boolean") return v;
+    const tp = window.ztools.dbStorage.getItem<string>("ocr.textProvider");
+    const fp = window.ztools.dbStorage.getItem<string>("ocr.formulaProvider");
+    return tp === "ai-ocr" || fp === "ai-latex-ocr";
   } catch (_) {
-    /* dbStorage 不可用：回落默认 */
+    /* dbStorage 不可用：回落默认（本机引擎） */
   }
-  return null;
+  return false;
 }
-function loadLastFormulaProvider(): FormulaProviderName | null {
+function saveAiEnabled(on: boolean): void {
   try {
-    const v = window.ztools.dbStorage.getItem<string>(LAST_FORMULA_PROVIDER_KEY);
-    if (v && v in formulaProviderLabels) {
-      const p = v as FormulaProviderName;
-      if (p === "latex" || providerConfigured.value["ai-latex-ocr"]) return p;
-    }
-  } catch (_) {
-    /* dbStorage 不可用：回落默认 */
-  }
-  return null;
-}
-function saveLastTextProvider(p: TextProviderName): void {
-  try {
-    window.ztools.dbStorage.setItem(LAST_TEXT_PROVIDER_KEY, p);
-  } catch (_) {
-    /* 写入失败忽略 */
-  }
-}
-function saveLastFormulaProvider(p: FormulaProviderName): void {
-  try {
-    window.ztools.dbStorage.setItem(LAST_FORMULA_PROVIDER_KEY, p);
+    window.ztools.dbStorage.setItem(AI_ENABLED_KEY, on);
   } catch (_) {
     /* 写入失败忽略 */
   }
 }
 
 /**
- * 切换文字模式 AI 识图开关：未配置 AI 模型时提示并保持原渠道；
- * 已配置则在 微信 OCR ↔ AI 识图 间切换，watch(textProvider) 会触发重识别。
+ * AI 开关点击：未配置模型时提示并保持原渠道；
+ * 否则切换开关并持久化，watch(aiEnabled) 会触发重识别（三种模式均支持双渠道）。
  */
-function toggleTextAi(): void {
-  if (!providerConfigured.value["ai-ocr"]) {
-    error("请先在「渠道」页配置 AI 识图模型");
+function toggleAi(): void {
+  if (!aiEnabled.value && !aiModelConfigured.value) {
+    error("请先在「渠道」页「AI 识别」中选择视觉模型");
     return;
   }
-  textProvider.value = textProvider.value === "ai-ocr" ? "ocr" : "ai-ocr";
+  aiEnabled.value = !aiEnabled.value;
+  saveAiEnabled(aiEnabled.value);
 }
 
-/**
- * 切换公式模式 AI 公式识别开关：未配置 AI 模型时提示并保持原渠道；
- * 已配置则在 本地引擎 ↔ AI 公式识别 间切换，watch(formulaProvider) 会触发重识别。
- */
-function toggleFormulaAi(): void {
-  if (!providerConfigured.value["ai-latex-ocr"]) {
-    error("请先在「渠道」页配置 AI 公式识别模型");
-    return;
-  }
-  formulaProvider.value =
-    formulaProvider.value === "ai-latex-ocr" ? "latex" : "ai-latex-ocr";
-}
+/** AI 开关悬浮提示：按配置状态给出操作指引。 */
+const aiToggleTitle = computed(() => {
+  if (aiEnabled.value) return "已启用 AI 识别，点击关闭改用本机引擎";
+  if (!aiModelConfigured.value)
+    return "未选择 AI 视觉模型，请先在「渠道」页「AI 识别」中配置";
+  return "启用 AI 识别（当前使用本机引擎）";
+});
 
-// setup 期初始化渠道：先刷新配置状态，再回填上次渠道；失效回落默认。
+// setup 期初始化：先刷新 AI 配置状态，再回填开关（含旧版本渠道偏好迁移）。
 // 在 setup 期完成，确保挂载时渠道已是最终值，避免 initialImage 首次识别用错渠道。
 refreshProviderStatus();
-const textProvider = ref<TextProviderName>(loadLastTextProvider() || "ocr");
-const formulaProvider = ref<FormulaProviderName>(
-  loadLastFormulaProvider() || "latex",
+const aiEnabled = ref(loadAiEnabled());
+
+// 当前模式实际使用的渠道（由 AI 开关推导）：识别派发与图片叠层控制复用。
+const textProvider = computed<TextProviderName>(() =>
+  aiEnabled.value ? "ai-ocr" : "ocr",
+);
+const formulaProvider = computed<FormulaProviderName>(() =>
+  aiEnabled.value ? "ai-latex-ocr" : "latex",
 );
 
 // ─── 模式 ────────────────────────────────────────────────────────────
-const mode = ref<"text" | "formula">(props.initialMode);
+const mode = ref<"text" | "formula" | "table">(props.initialMode);
 
-function switchMode(next: "text" | "formula") {
+function switchMode(next: "text" | "formula" | "table") {
   if (mode.value === next) return;
   mode.value = next;
   // 切换后自动识别当前模式：若该模式已有缓存结果则直接展示（命中缓存不重识别），
@@ -206,15 +179,19 @@ function switchMode(next: "text" | "formula") {
   autoRecognize();
 }
 
-// 引擎就绪态按模式 + 渠道映射：AI 渠道不依赖本机引擎，视为就绪。
+// 引擎就绪态按模式 + 渠道映射：AI 渠道不依赖本机引擎（已配置模型即视为就绪）；
+// 本机渠道：文字 / 表格 = 微信 OCR 引擎，公式 = 本地 LaTeX 引擎。
 const engineReady = computed(() => {
-  if (mode.value === "text")
-    return textProvider.value === "ai-ocr" ? true : nativeReady.value;
-  return formulaProvider.value === "ai-latex-ocr" ? true : latexReady.value;
+  if (!aiEnabled.value) {
+    return mode.value === "formula" ? latexReady.value : nativeReady.value;
+  }
+  return mode.value === "table" ? aiModelConfigured.value : true;
 });
 
-// 模式切换条滑动高亮：文字=0、公式=1
-const modeIndex = computed(() => (mode.value === "text" ? 0 : 1));
+// 模式切换条滑动高亮：文字=0、公式=1、表格=2
+const modeIndex = computed(() =>
+  mode.value === "text" ? 0 : mode.value === "formula" ? 1 : 2,
+);
 const {
   containerRef: modeSwitchRef,
   setItemRef: setModeItemRef,
@@ -296,11 +273,25 @@ const latexError = ref("");
 const latex = ref("");
 const latexDone = ref(false);
 
+// 表格识别结果（AI 专属模式，存 Markdown 表格源码，供预览解析与复制）
+const tableLoading = ref(false);
+const tableError = ref("");
+const tableMarkdown = ref("");
+const tableDone = ref(false);
+
 const loading = computed(() =>
-  mode.value === "text" ? ocrLoading.value : latexLoading.value,
+  mode.value === "text"
+    ? ocrLoading.value
+    : mode.value === "formula"
+      ? latexLoading.value
+      : tableLoading.value,
 );
 const errorText = computed(() =>
-  mode.value === "text" ? ocrError.value : latexError.value,
+  mode.value === "text"
+    ? ocrError.value
+    : mode.value === "formula"
+      ? latexError.value
+      : tableError.value,
 );
 
 // 文字模式：列表↔图上高亮联动的当前悬停索引（-1 表示无）
@@ -360,6 +351,7 @@ function autoRecognize() {
   if (!recognizeSrc.value || !engineReady.value) return;
   if (mode.value === "text" && ocrDone.value) return;
   if (mode.value === "formula" && latexDone.value) return;
+  if (mode.value === "table" && tableDone.value) return;
   nextTick(() => recognize());
 }
 
@@ -410,10 +402,17 @@ function resetFormulaResult() {
   latexError.value = "";
   latexDone.value = false;
 }
-/** 清空两种模式的结果与 done 标记（换新图时调用）。 */
+/** 清空表格模式结果（换图时调用）。 */
+function resetTableResult() {
+  tableMarkdown.value = "";
+  tableError.value = "";
+  tableDone.value = false;
+}
+/** 清空所有模式的结果与 done 标记（换新图时调用）。 */
 function resetResults() {
   resetTextResult();
   resetFormulaResult();
+  resetTableResult();
 }
 
 async function onFileChange(e: Event) {
@@ -591,10 +590,98 @@ async function recognizeFormula() {
   }
 }
 
+/**
+ * 表格识别成功后的统一处理：回填 Markdown 源码、提示、上抛历史记录。
+ * AI 渠道直接传返回的 Markdown；本机引擎渠道先把聚类恢复的 table / row / cell
+ * 序列化为 Markdown 再传入——两渠道共用预览 / 复制链路。
+ * @param md        Markdown 表格源码（空串按「未识别到表格」处理）。
+ * @param successMsg 成功提示文案（本机渠道带行列规模，AI 渠道用默认）。
+ */
+function applyTableResult(md: string, successMsg = "表格识别完成") {
+  tableMarkdown.value = md;
+  if (!md) {
+    error("未识别到表格");
+    return;
+  }
+  success(successMsg);
+  // 历史标题取首个非空单元格（表头优先），便于在列表中区分不同表格
+  const t = parseMarkdownTable(md);
+  const firstCell = t ? (t.headers[0] || t.rows[0]?.[0] || "") : md;
+  // 上抛历史记录：只有真正调识别服务成功才留一笔（命中缓存不会进此分支）
+  emit("history", {
+    kind: "ocr-table",
+    thumbnail: imageSrc.value,
+    title: String(firstCell).slice(0, 40) || "（未识别到表格）",
+    payload: {
+      kind: "ocr-table",
+      imageSrc: imageSrc.value,
+      markdown: md,
+    },
+  });
+}
+
+/**
+ * 本机引擎（微信 OCR）表格识别的统一处理：识别行经 ocrTable 几何聚类恢复
+ * table / row / cell，未检出表格结构（纯文本页 / 无坐标伪行）时按空结果处理。
+ * 恢复结果序列化为 Markdown 后走 applyTableResult，与 AI 渠道共用展示与复制。
+ */
+function applyLocalTableResult(lines: OcrLine[]) {
+  const split = splitOcrRegions(lines);
+  const tables = split?.tables ?? [];
+  if (!tables.length) {
+    applyTableResult("");
+    return;
+  }
+  const md = tables.map((t) => buildMarkdownTable(t.headers, t.rows)).join("\n\n");
+  const first = tables[0];
+  const detail =
+    tables.length > 1
+      ? `表格识别完成，检出 ${tables.length} 张（首张 ${first.rows.length + 1} 行 × ${first.colCount} 列）`
+      : `表格识别完成，共 ${first.rows.length + 1} 行 × ${first.colCount} 列`;
+  applyTableResult(md, detail);
+}
+
+async function recognizeTable() {
+  if (!recognizeSrc.value) return;
+  // AI 渠道需已配置视觉模型；本机渠道需微信 OCR 引擎就绪（未就绪静默跳过，
+  // 由引擎引导卡引导下载，就绪后由 nativeReady watcher 补识别）
+  if (aiEnabled.value) {
+    if (!aiModelConfigured.value) return;
+  } else if (!nativeReady.value) {
+    return;
+  }
+  // 并发保护：与 recognizeText 同理，防止引擎就绪态抖动引发的重复识别。
+  if (tableLoading.value) return;
+  tableLoading.value = true;
+  tableError.value = "";
+  tableMarkdown.value = "";
+  try {
+    if (aiEnabled.value) {
+      const out = await window.services.tableAi(recognizeSrc.value);
+      applyTableResult((out && out.table) || "");
+    } else {
+      // 本机渠道：微信 OCR 返回带坐标的行，几何聚类恢复表格结构
+      const result = await window.services.ocrImageDetail(recognizeSrc.value);
+      if (result.ok) applyLocalTableResult(result.lines ?? []);
+      else {
+        tableError.value = result.error || "识别失败";
+        error(tableError.value);
+      }
+    }
+  } catch (err: any) {
+    tableError.value = err?.message ? String(err.message) : String(err);
+    error(tableError.value);
+  } finally {
+    tableDone.value = true;
+    tableLoading.value = false;
+  }
+}
+
 /** 统一的「识别」入口：按当前模式派发；已识别过则重新识别（覆盖结果）。 */
 async function recognize() {
   if (mode.value === "text") await recognizeText();
-  else await recognizeFormula();
+  else if (mode.value === "formula") await recognizeFormula();
+  else await recognizeTable();
 }
 
 // ─── 复制 ────────────────────────────────────────────────────────────
@@ -626,6 +713,33 @@ function copyLatex(kind: "raw" | "inline" | "display") {
   );
 }
 
+// ─── 表格结果：预览数据与复制 ────────────────────────────────────────
+// 表格预览：将识别得到的 Markdown 源码解析为表头 / 行列结构供渲染。
+const parsedTable = computed(() => parseMarkdownTable(tableMarkdown.value));
+
+/** 表格列对齐样式（来自分隔行的 :---: 标记，未标注用默认左对齐）。 */
+function alignStyle(i: number): Record<string, string> {
+  const a = parsedTable.value?.aligns[i];
+  return a ? { textAlign: a } : {};
+}
+
+/** 复制表格：TSV（粘贴进 Excel / WPS）/ Markdown 源码 / HTML；AI 与本机渠道共用。 */
+function copyTable(kind: "tsv" | "markdown" | "html") {
+  if (!tableMarkdown.value) return;
+  let text = tableMarkdown.value;
+  if (kind === "tsv") text = markdownTableToTsv(tableMarkdown.value);
+  else if (kind === "html") text = markdownTableToHtml(tableMarkdown.value);
+  if (!text) return;
+  window.ztools.copyText(text);
+  success(
+    kind === "markdown"
+      ? "已复制 Markdown"
+      : kind === "tsv"
+        ? "已复制表格（TSV），可粘贴进表格软件"
+        : "已复制 HTML",
+  );
+}
+
 // ─── KaTeX 渲染 ─────────────────────────────────────────────────────
 // 用 computed + v-html：切换模式导致预览 div 重新挂载时，Vue 会自动按当前
 // 缓存的 latex 重新写入 innerHTML，无需依赖 latex 值变化触发 watcher
@@ -650,19 +764,12 @@ const latexHtml = computed(() => {
 
 // ─── 外部 initialImage 自动识别 ──────────────────────────────────────
 // 引擎未就绪时仅载入图片（不识别），就绪后由下方 watcher 按当前模式补识别。
-async function applyInitial(image: string, targetMode: "text" | "formula") {
+async function applyInitial(image: string, targetMode: "text" | "formula" | "table") {
   if (!image) return;
   mode.value = targetMode;
   setImage(image);
   autoRecognize();
 }
-
-// 模式变化上报父组件：immediate 保证每次重建即同步初始模式。
-watch(
-  mode,
-  (m) => emit("mode-change", m),
-  { immediate: true },
-);
 
 watch(
   () => props.initialImage,
@@ -672,15 +779,18 @@ watch(
   { immediate: true },
 );
 
-// 文字引擎就绪后补识别：覆盖「下载期间选图」与「切到文字模式时引擎仍在下载」两种场景。
-// 另覆盖 autoCapture（screen-ocr 入口）：引擎未就绪时截图被搁置，就绪后自动补截图。
+// 文字 / 表格引擎（微信 OCR，同一引擎）就绪后补识别：覆盖「下载期间选图」与
+// 「切到该模式时引擎仍在下载」两种场景。另覆盖 autoCapture（screen-ocr / screen-latex
+// 入口）：引擎未就绪时截图被搁置，就绪后自动补截图。
 // AI 渠道不依赖本机引擎（engineReady 恒就绪），由 setup 期 autoRecognize 直接触发；
 // 此 watcher 跳过 AI 渠道，避免引擎下载完成时对 AI 渠道误触发重识别。
 watch(nativeReady, (ready) => {
-  if (!ready || mode.value !== "text" || textProvider.value === "ai-ocr")
-    return;
-  if (recognizeSrc.value && !ocrDone.value) {
-    nextTick(() => recognizeText());
+  if (!ready || aiEnabled.value) return;
+  const pending =
+    (mode.value === "text" && !ocrDone.value) ||
+    (mode.value === "table" && !tableDone.value);
+  if (recognizeSrc.value && pending) {
+    nextTick(() => recognize());
   } else if (props.autoCapture && !autoCaptureDone.value) {
     maybeAutoCapture();
   }
@@ -689,12 +799,7 @@ watch(nativeReady, (ready) => {
 // 公式引擎就绪后补识别：与文字引擎对称，含 autoCapture（screen-latex 入口）补截图。
 // AI 渠道同理跳过。
 watch(latexReady, (ready) => {
-  if (
-    !ready ||
-    mode.value !== "formula" ||
-    formulaProvider.value === "ai-latex-ocr"
-  )
-    return;
+  if (!ready || mode.value !== "formula" || aiEnabled.value) return;
   if (recognizeSrc.value && !latexDone.value) {
     nextTick(() => recognizeFormula());
   } else if (props.autoCapture && !autoCaptureDone.value) {
@@ -702,21 +807,15 @@ watch(latexReady, (ready) => {
   }
 });
 
-// 切换渠道：持久化上次渠道，并立即按当前图片重识别当前模式
-// （参考 Translate 切 provider 不 debounce 立即 run）。
-// 已有图片但引擎未就绪时跳过，就绪后由上方 watcher 补识别。
-watch(textProvider, () => {
-  saveLastTextProvider(textProvider.value);
+// AI 开关切换：三种模式的渠道同时变化，结果全部重置，并对当前模式立即重识别
+// （表格模式本机渠道 = 微信 OCR + 几何聚类，AI 渠道 = 视觉模型输出 Markdown）。
+// 已有图片但引擎未就绪（关闭 AI 后本机引擎未下载）时跳过，就绪后由上方 watcher 补识别。
+watch(aiEnabled, () => {
+  resetTextResult();
+  resetFormulaResult();
+  resetTableResult();
   if (recognizeSrc.value && engineReady.value) {
-    resetTextResult();
-    nextTick(() => recognizeText());
-  }
-});
-watch(formulaProvider, () => {
-  saveLastFormulaProvider(formulaProvider.value);
-  if (recognizeSrc.value && engineReady.value) {
-    resetFormulaResult();
-    nextTick(() => recognizeFormula());
+    nextTick(() => recognize());
   }
 });
 
@@ -800,7 +899,10 @@ onUnmounted(() => {
                 选择图片或截图识别，也可拖入 / 粘贴图片
               </div>
             </div>
-            <div v-if="latexLoading" class="loading-overlay">识别中…</div>
+            <div
+              v-if="latexLoading || tableLoading"
+              class="loading-overlay"
+            >识别中…</div>
           </template>
         </div>
 
@@ -845,117 +947,153 @@ onUnmounted(() => {
 
       <!-- 右：结果面板 -->
       <div class="pane pane-result">
-        <!-- 模式切换：独占一行撑满 -->
-        <div
-          class="mode-switch"
-          :class="{ dark: isDark }"
-          role="tablist"
-          aria-label="识别模式"
-          ref="modeSwitchRef"
-        >
-          <!-- 滑动高亮指示条：吸附到当前模式按钮 -->
-          <span
-            class="mode-indicator"
-            :class="{ 'no-anim': modeNoAnim }"
-            :style="{
-              transform: `translateX(${modeIndicator.x}px)`,
-              width: modeIndicator.w ? `${modeIndicator.w}px` : '0px'
+        <!-- 顶部操作条：左侧三模式切换（文字 / 公式 / 表格）+ 右侧独立 AI 开关 -->
+        <div class="mode-bar" :class="{ dark: isDark }">
+          <!-- 模式切换：滑动高亮分段控件 -->
+          <div
+            class="mode-switch"
+            role="tablist"
+            aria-label="识别模式"
+            ref="modeSwitchRef"
+          >
+            <!-- 滑动高亮指示条：吸附到当前模式按钮 -->
+            <span
+              class="mode-indicator"
+              :class="{ 'no-anim': modeNoAnim }"
+              :style="{
+                transform: `translateX(${modeIndicator.x}px)`,
+                width: modeIndicator.w ? `${modeIndicator.w}px` : '0px'
+              }"
+            ></span>
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: mode === 'text' }"
+              :aria-selected="mode === 'text'"
+              :ref="(el) => setModeItemRef(el, 0)"
+              @click="switchMode('text')"
+            >
+              <svg
+                class="mode-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <path d="M4 6h16M4 12h16M4 18h10" />
+              </svg>
+              <span class="mode-label">文字</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: mode === 'formula' }"
+              :aria-selected="mode === 'formula'"
+              :ref="(el) => setModeItemRef(el, 1)"
+              @click="switchMode('formula')"
+            >
+              <svg
+                class="mode-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <!-- Σ 求和符号：公式识别 -->
+                <path d="M17 5H7l6 7-6 7h10" />
+              </svg>
+              <span class="mode-label">公式</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="mode-btn"
+              :class="{ active: mode === 'table' }"
+              :aria-selected="mode === 'table'"
+              :ref="(el) => setModeItemRef(el, 2)"
+              @click="switchMode('table')"
+            >
+              <svg
+                class="mode-icon"
+                xmlns="http://www.w3.org/2000/svg"
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.9"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <!-- 网格：表格识别 -->
+                <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                <path d="M3.5 9.5h17M9.5 9.5V19.5M15.5 9.5V19.5" />
+              </svg>
+              <span class="mode-label">表格</span>
+            </button>
+          </div>
+
+          <!-- AI 渠道开关：独立于模式选择。开启后走 AI 视觉模型（表格识别输出
+               Markdown）；关闭用本机引擎（表格识别 = 微信 OCR + 几何聚类）；
+               未配置模型时置灰并提示。 -->
+          <button
+            type="button"
+            class="ai-toggle"
+            :class="{
+              active: aiEnabled,
+              disabled: !aiEnabled && !aiModelConfigured,
             }"
-          ></span>
-          <button
-            type="button"
-            role="tab"
-            class="mode-btn"
-            :class="{ active: mode === 'text' }"
-            :aria-selected="mode === 'text'"
-            :ref="(el) => setModeItemRef(el, 0)"
-            @click="switchMode('text')"
+            :title="aiToggleTitle"
+            :aria-pressed="aiEnabled"
+            @click="toggleAi"
           >
-            <span class="mode-label">文字</span>
-            <!-- AI 渠道开关：图标高亮表示当前已启用 AI 识图；
-                 未配置 AI 模型时禁用；点击切换 微信 OCR ↔ AI 识图。 -->
-            <span
-              class="ai-chip"
-              :class="{
-                active: textProvider === 'ai-ocr',
-                disabled: !providerConfigured['ai-ocr'],
-              }"
-              :title="
-                !providerConfigured['ai-ocr']
-                  ? '未配置 AI 识图模型，请先在「渠道」页配置'
-                  : textProvider === 'ai-ocr'
-                    ? '已启用 AI 识图，点击关闭改用微信 OCR'
-                    : 'AI 识图就绪，点击启用'
-              "
-              @click.stop="toggleTextAi"
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <!-- Icon from Material Symbols (auto_awesome / sparkle) - https://github.com/google/material-design-icons/blob/master/LICENSE -->
-                <path
-                  fill="currentColor"
-                  d="m19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z"
-                />
-              </svg>
-            </span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="mode-btn"
-            :class="{ active: mode === 'formula' }"
-            :aria-selected="mode === 'formula'"
-            :ref="(el) => setModeItemRef(el, 1)"
-            @click="switchMode('formula')"
-          >
-            <span class="mode-label">公式</span>
-            <!-- AI 渠道开关：图标高亮表示当前已启用 AI 公式识别；
-                 未配置 AI 模型时禁用；点击切换 本地引擎 ↔ AI 公式识别。 -->
-            <span
-              class="ai-chip"
-              :class="{
-                active: formulaProvider === 'ai-latex-ocr',
-                disabled: !providerConfigured['ai-latex-ocr'],
-              }"
-              :title="
-                !providerConfigured['ai-latex-ocr']
-                  ? '未配置 AI 公式识别模型，请先在「渠道」页配置'
-                  : formulaProvider === 'ai-latex-ocr'
-                    ? '已启用 AI 公式识别，点击关闭改用本地引擎'
-                    : 'AI 公式识别就绪，点击启用'
-              "
-              @click.stop="toggleFormulaAi"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="13"
-                height="13"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <!-- Icon from Material Symbols (auto_awesome / sparkle) - https://github.com/google/material-design-icons/blob/master/LICENSE -->
-                <path
-                  fill="currentColor"
-                  d="m19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z"
-                />
-              </svg>
-            </span>
+              <!-- Icon from Material Symbols (auto_awesome / sparkle) - https://github.com/google/material-design-icons/blob/master/LICENSE -->
+              <path
+                fill="currentColor"
+                d="m19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z"
+              />
+            </svg>
+            <span>AI</span>
           </button>
         </div>
 
-        <!-- 引擎未就绪引导（按当前模式） -->
+        <!-- 引擎未就绪引导（按当前模式与渠道） -->
         <div v-if="!engineReady" class="engine-guide">
           <EngineStatusCard
+            v-if="mode !== 'table' || !aiEnabled"
             :show-actions="false"
             style="width: 100%;height: 100%;justify-content: center;"
-            :engine-kind="mode === 'text' ? 'wechat' : 'latex'"
-            @downloaded="mode === 'text' ? checkNative() : checkLatex()"
+            :engine-kind="mode === 'formula' ? 'latex' : 'wechat'"
+            @downloaded="mode === 'formula' ? checkLatex() : checkNative()"
           />
+          <!-- 表格模式 AI 渠道：就绪 = 已配置 AI 视觉模型 -->
+          <div v-else class="ai-guide">
+            <div class="ai-guide-icon">✨</div>
+            <div class="ai-guide-text">
+              表格识别由 AI 视觉模型完成，请先在「渠道」页「AI
+              识别」中选择支持视觉的模型
+            </div>
+          </div>
         </div>
 
         <!-- 结果区 -->
@@ -1112,7 +1250,7 @@ onUnmounted(() => {
           </div>
 
           <!-- 公式模式结果 -->
-          <div v-else class="result-body">
+          <div v-else-if="mode === 'formula'" class="result-body">
             <div v-if="latexLoading" class="result-empty">识别中…</div>
             <div v-else-if="latexError" class="result-empty error">
               {{ latexError }}
@@ -1151,6 +1289,65 @@ onUnmounted(() => {
               </div>
             </template>
           </div>
+
+          <!-- 表格模式结果：Markdown 表格预览 + 三种复制形式 -->
+          <div v-else class="result-body">
+            <div v-if="tableLoading" class="result-empty">识别中…</div>
+            <div v-else-if="tableError" class="result-empty error">
+              {{ tableError }}
+            </div>
+            <div v-else-if="tableDone && !tableMarkdown" class="result-empty">
+              未识别到表格
+            </div>
+            <div v-else-if="!tableDone" class="result-empty placeholder">
+              选择图片或截图后自动识别，结果将在此显示
+            </div>
+            <template v-else>
+              <div class="table-layout" :class="{ dark: isDark }">
+                <!-- 表格预览（随识别结果实时解析渲染） -->
+                <div class="result-section table-half">
+                  <div class="section-title">表格预览</div>
+                  <div class="table-preview">
+                    <table v-if="parsedTable" class="md-table">
+                      <thead>
+                        <tr>
+                          <th
+                            v-for="(h, i) in parsedTable.headers"
+                            :key="'h' + i"
+                            :style="alignStyle(i)"
+                          >
+                            {{ h }}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr
+                          v-for="(r, ri) in parsedTable.rows"
+                          :key="'r' + ri"
+                        >
+                          <td
+                            v-for="(c, ci) in r"
+                            :key="ci"
+                            :style="alignStyle(ci)"
+                          >
+                            {{ c }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <div v-else class="table-fallback">
+                      暂无法解析为表格
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="copy-actions">
+                <ZButton @click="copyTable('tsv')">复制为表格</ZButton>
+                <ZButton @click="copyTable('markdown')">复制为 md</ZButton>
+                <ZButton @click="copyTable('html')">复制 HTML</ZButton>
+              </div>
+            </template>
+          </div>
         </template>
       </div>
     </div>
@@ -1180,7 +1377,8 @@ onUnmounted(() => {
   display: flex;
   gap: 14px;
   min-height: 0;
-  padding: 14px;
+  /* 底部留白由 SettingLayout 内容区统一预留，这里不再重复 */
+  padding: 14px 14px 0;
   transition:
     border-color 0.15s,
     background 0.15s;
@@ -1278,9 +1476,18 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 模式切换：独占一行撑满 */
+/* 顶部操作条：左侧模式切换（撑满）+ 右侧独立 AI 开关 */
+.mode-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+/* 模式切换：占满剩余宽度 */
 .mode-switch {
   position: relative;
+  flex: 1;
+  min-width: 0;
   display: flex;
   gap: 2px;
   padding: 3px;
@@ -1308,19 +1515,20 @@ onUnmounted(() => {
   transition: none;
 }
 
-/* scoped 下 :global 失效，改用 .dark 类驱动暗色高亮（不刺眼） */
-.mode-switch.dark .mode-indicator {
+/* scoped 下 :global 失效，改用 .dark 类驱动暗色高亮（不刺眼）。
+   dark 类挂在 .mode-bar 上，指示条 / AI 开关均为其后代。 */
+.mode-bar.dark .mode-indicator {
   background: var(--sub-item-active-bg, rgba(255, 255, 255, 0.08));
   box-shadow: none;
 }
 
 .mode-btn {
   flex: 1;
-  /* 文字与右侧 AI 图标横向居中排列 */
+  /* 图标与文字横向居中排列 */
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
   padding: 6px 14px;
   border: none;
   background: transparent;
@@ -1337,48 +1545,59 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.mode-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
 /* 激活态：仅着色 + 加粗，背景由 .mode-indicator 滑动提供 */
 .mode-btn.active {
   color: var(--primary-color, #1976d2);
   font-weight: 600;
 }
 
-/* AI 渠道开关：嵌在模式按钮文字右侧，sparkle 图标。
-   - active：当前已启用 AI 渠道，主色 + 浅色底；
-   - 默认态：灰色，hover 主色 + 浅底；
+/* AI 渠道开关：独立于模式选择的 pill 按钮（sparkle + AI 字样）。
+   - active：AI 渠道启用时主色 + 浅色底；
+   - 默认态：灰色，hover 主色描边；
    - disabled：未配置 AI 模型，置灰不可点。 */
-.ai-chip {
+.ai-toggle {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 9px;
+  gap: 4px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  background: var(--sub-bar-bg, rgba(0, 0, 0, 0.05));
   color: var(--text-secondary, #999);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  border-radius: 9px;
   cursor: pointer;
-  flex-shrink: 0;
+  font-family: inherit;
   transition:
     color 0.15s,
-    background 0.15s;
+    background 0.15s,
+    border-color 0.15s;
 }
 
-.ai-chip:not(.active):not(.disabled):hover {
+.ai-toggle:not(.active):not(.disabled):hover {
   color: var(--primary-color, #1976d2);
-  background: var(--hover-bg, rgba(0, 0, 0, 0.08));
+  border-color: color-mix(in srgb, var(--primary-color, #1976d2), transparent 60%);
 }
 
-.ai-chip.active {
+.ai-toggle.active {
   color: var(--primary-color, #1976d2);
   background: color-mix(in srgb, var(--primary-color, #1976d2), transparent 85%);
 }
 
-.ai-chip.disabled {
+.ai-toggle.disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
 
 /* scoped 下 :global 失效，用 .dark 类驱动暗色 hover 背景 */
-.mode-switch.dark .ai-chip:not(.active):not(.disabled):hover {
+.mode-bar.dark .ai-toggle:not(.active):not(.disabled):hover {
   background: var(--hover-bg, rgba(255, 255, 255, 0.08));
 }
 
@@ -1667,6 +1886,95 @@ onUnmounted(() => {
   background: var(--code-bg, #2a2a2a);
   color: var(--text-color, #f3f4f6);
   border-color: var(--border-color, #374151);
+}
+
+/* 表格结果：预览区独占撑满（dark 类驱动暗色预览） */
+.table-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.table-half {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.table-preview {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 8px;
+  background: var(--card-bg, #fff);
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #e5e6eb);
+  overflow: auto;
+}
+
+/* scoped 下 :global 失效，用 .dark 类驱动暗色表格预览 */
+.table-layout.dark .table-preview {
+  background: var(--code-bg, #2a2a2a);
+  border-color: var(--border-color, #374151);
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border-color, #e5e6eb);
+  padding: 6px 10px;
+  text-align: left;
+  word-break: break-all;
+}
+
+.md-table th {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+  font-weight: 600;
+}
+
+.table-layout.dark .md-table th {
+  background: var(--hover-bg, rgba(255, 255, 255, 0.06));
+}
+
+/* 源码解析不出表格结构时的占位提示 */
+.table-fallback {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--text-secondary, #999);
+  text-align: center;
+}
+
+/* 表格模式 AI 引导卡（未配置视觉模型时占位） */
+.ai-guide {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  border: 1px dashed var(--border-color, #e5e6eb);
+  border-radius: 10px;
+  text-align: center;
+}
+
+.ai-guide-icon {
+  font-size: 28px;
+}
+
+.ai-guide-text {
+  font-size: 13px;
+  color: var(--text-secondary, #999);
+  line-height: 1.6;
+  max-width: 320px;
 }
 
 .copy-actions {

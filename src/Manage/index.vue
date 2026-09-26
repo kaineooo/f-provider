@@ -86,26 +86,12 @@ const translateRef = ref<TranslateExposed | null>(null)
 
 const activeKey = ref('channels')
 
-// 识别页当前模式（由 Recognize 上报）：公式模式下底部悬浮栏左对齐，
-// 避免遮挡右下角的三个复制按钮。
-const recognizeMode = ref<'text' | 'formula'>('text')
-
-const dockAlign = computed<'center' | 'left'>(() =>
-  activeKey.value === 'recognize' && recognizeMode.value === 'formula'
-    ? 'left'
-    : 'center'
-)
-
-function onRecognizeModeChange(mode: 'text' | 'formula') {
-  recognizeMode.value = mode
-}
-
 // 传给「识别」/「翻译」的预填值。每次进入重置，配合 :key 重建组件，
 // 保证「新建 tab、不复用上次状态」的语义。
 const initialImage = ref('')
 const initialText = ref('')
 /** 识别页初始模式：latex-recognize / screen-latex 入口为 formula，其它为 text */
-const initialMode = ref<'text' | 'formula'>('text')
+const initialMode = ref<'text' | 'formula' | 'table'>('text')
 /**
  * 进入即自动截屏（screen-ocr / screen-latex feature）。
  * 仅这两个截图入口置 true，交由 Recognize 在 onMounted / 引擎就绪后自动截图；
@@ -258,7 +244,6 @@ onMounted(() => {
     v-model="activeKey"
     :items="items"
     :version="nativeVersion || latexVersion || undefined"
-    :dock-align="dockAlign"
     :dock-always-visible="settings.dockAlwaysVisible"
   >
   <!--
@@ -280,7 +265,6 @@ onMounted(() => {
       :initial-mode="initialMode"
       :auto-capture="autoCapture"
       :translate-after-ocr="autoTranslateAfterOcr"
-      @mode-change="onRecognizeModeChange"
       @history="onHistory"
       @translate="onOcrToTranslate"
       @text-result="onOcrTextResult"

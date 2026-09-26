@@ -17,7 +17,6 @@ defineProps<{
     | 'microsoft'
     | 'ai-translation'
     | 'ai-ocr'
-    | 'ai-latex-ocr'
     | 'image-host'
 }>()
 
@@ -48,7 +47,6 @@ const logos = {
   microsoft: microsoftLogo,
   'ai-translation': aiLogo,
   'ai-ocr': aiLogo,
-  'ai-latex-ocr': aiLogo,
   'image-host': imageHostLogo
 }
 </script>

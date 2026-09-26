@@ -102,6 +102,14 @@ const GH_PROXY_HOSTS = [
 // ──────────────────────────────────────────────────────────────────────────
 
 // 通过 window 对象向渲染进程注入 nodejs 能力
+// AI 识别内置提示词（按识别类型区分，key 与 _aiVisionRecognize 的 promptKey 对应）。
+// 提示词不落盘、不可由用户修改：识图 / 公式 / 表格各自优化，保证输出格式可解析。
+const AI_VISION_PROMPTS = {
+  text: '识别图片中的所有文字，按原文逐行输出，只输出识别到的文字，不要解释或附加说明。',
+  latex: '识别图片中的数学公式并输出对应的 LaTeX 源码。只输出 LaTeX 代码，不要用 $ 或 $$ 包裹，不要解释或附加说明。',
+  table: '识别图片中的表格，输出 Markdown 表格。第一行为表头，第二行为 |---| 分隔行，之后每个数据行一行；单元格内不要换行。只输出 Markdown 表格，不要解释或附加说明。'
+}
+
 window.services = {
   // 读文件
   readFile(file) {
@@ -1320,22 +1328,22 @@ setTranslateSettings(provider, data) {
   window.ztools.dbStorage.setItem('translate.' + provider, data)
 },
 
-// 读某 OCR provider 的设置（合并默认值）。现有 ocr 无配置，
-// ai-ocr 与 ai-latex-ocr 复用宿主 AI 视觉模型，需模型选择与 prompt 模板（不存密钥）。
+// 读某 OCR provider 的设置（合并默认值）。现有 ocr 无配置；
+// ai-ocr 为统一 AI 视觉模型设置（识图 / 公式 / 表格共用同一个模型，提示词内置不落盘）。
 getOcrSettings(provider) {
   const defaults = {
-    'ai-ocr': {
-      model: '',
-      systemPrompt: '识别图片中的所有文字，按原文逐行输出，只输出识别到的文字，不要解释或附加说明。'
-    },
-    'ai-latex-ocr': {
-      model: '',
-      systemPrompt: '识别图片中的数学公式并输出对应的 LaTeX 源码。只输出 LaTeX 代码，不要用 $ 或 $$ 包裹，不要解释或附加说明。'
-    }
+    'ai-ocr': { model: '' }
   }
   const base = defaults[provider] || {}
   const stored = window.ztools.dbStorage.getItem('ocr.' + provider) || {}
-  return Object.assign({}, base, stored)
+  const merged = Object.assign({}, base, stored)
+  // 旧版本迁移：公式识别曾有独立模型（ocr.ai-latex-ocr.model），未另选统一模型时沿用，
+  // 避免升级后已配置的公式模型丢失。
+  if (provider === 'ai-ocr' && !merged.model) {
+    const legacy = window.ztools.dbStorage.getItem('ocr.ai-latex-ocr')
+    if (legacy && legacy.model) merged.model = legacy.model
+  }
+  return merged
 },
 
 // 写某 OCR provider 的设置到 ztools.dbStorage。
@@ -1344,9 +1352,9 @@ setOcrSettings(provider, data) {
   window.ztools.dbStorage.setItem('ocr.' + provider, data)
 },
 
-// ─── 图床（AI 识图/公式识别的图片上传通道，可扩展）─────────────────────────
-// 配置存 dbStorage key 'ocr.image-host'，ai-ocr 与 ai-latex-ocr 共用。
-// 默认 enabled=true：升级即生效；关闭或上传失败由 ocrAi/latexAi 回退 base64 直传。
+// ─── 图床（AI 识别的图片上传通道，可扩展）─────────────────────────────────
+// 配置存 dbStorage key 'ocr.image-host'，AI 识图 / 公式 / 表格识别共用。
+// 默认 enabled=true：升级即生效；关闭或上传失败由 AI 识别回退 base64 直传。
 getImageHostSettings() {
   const defaults = { enabled: true, type: 'img-scdn' }
   const stored = window.ztools.dbStorage.getItem('ocr.image-host') || {}
@@ -1581,10 +1589,12 @@ async translateMicrosoft(text, from, to) {
   return { text: arr[0].translations[0].text, detectedFrom: from }
 },
 
-// ─── AI 翻译 / AI OCR（走宿主 ztools.ai）─────────────────────────────────
-// 复用宿主已配置的 AI 模型，本插件不存 apiKey/baseUrl，仅存模型选择与 prompt 模板。
+// ─── AI 翻译 / AI 识别（走宿主 ztools.ai）─────────────────────────────────
+// 复用宿主已配置的 AI 模型，本插件不存 apiKey/baseUrl，仅存模型选择。
+// AI 识别（识图 / 公式 / 表格）共用同一个视觉模型（ocr.ai-ocr.model），
+// 提示词内置（不落盘、不可修改），按识别类型各自优化。
 // ztools.ai 非流式返回 { content, reasoning_content? }；system 提示须放进 messages[0]。
-// 注意：handler 内 this 不是 services，故这两个方法经 window.services.xxx 调用时，
+// 注意：handler 内 this 不是 services，故这些方法经 window.services.xxx 调用时，
 // 内部若要读配置须用 this.getTranslateSettings / this.getOcrSettings（与其它翻译方法一致）。
 
 // AI 翻译：input { text, from?, to? } -> { text, detectedFrom? }
@@ -1607,101 +1617,107 @@ async translateAi(text, from, to) {
   return { text: out, detectedFrom: from }
 },
 
-// AI OCR：input { image, lang? } -> { text, blocks?, confidence? }
-// image 可为 本地路径 / data URI / http(s) URL：本地路径经 readFileAsDataURL 转 data URI 后传入。
-// 必须选择支持视觉的模型，宿主不识别「视觉模型」概念，纯文本模型会由远端报错透传。
-async ocrAi(image, lang) {
-  const { model, systemPrompt } = this.getOcrSettings('ai-ocr')
-  if (!model) throw new Error('AI 识图未选择模型，请在「翻译/OCR 提供商」设置页选择支持视觉的模型')
-  if (!image) throw new Error('AI 识图未提供图片')
-  console.debug('[ai-ocr] start', { model, lang: lang || null, src: image.slice(0, 24) + (image.length > 24 ? '…(' + image.length + ')' : '') })
-  // 先走图床（开启时）拿可访问 URL，省 token 且防大图 base64 截断；
-  // 关闭 / 未知类型 / 上传失败时 uploadImage 返回 null，回退本地路径转 data URI。
+// AI 识别统一取图：先走图床（开启时）拿可访问 URL，省 token 且防大图 base64 截断；
+// 关闭 / 未知类型 / 上传失败时回退——本地路径转 data URI，data URI / http(s) URL 原样透传。
+async _aiVisionImageUrl(image, tag) {
   let imageUrl = await this.uploadImage(image)
   if (!imageUrl) {
     if (!/^https?:\/\//i.test(image) && !/^data:/i.test(image)) {
       imageUrl = this.readFileAsDataURL(image)
-      console.debug('[ai-ocr] image-host miss → local-path data URI', { dataUriLen: imageUrl.length })
+      console.debug('[' + tag + '] image-host miss → local-path data URI', { dataUriLen: imageUrl.length })
     } else {
       imageUrl = image
-      console.debug('[ai-ocr] image-host miss → input passthrough', { kind: /^data:/i.test(image) ? 'data-uri' : 'http' })
+      console.debug('[' + tag + '] image-host miss → input passthrough', { kind: /^data:/i.test(image) ? 'data-uri' : 'http' })
     }
   } else {
-    console.debug('[ai-ocr] image-host hit', { urlLen: imageUrl.length })
+    console.debug('[' + tag + '] image-host hit', { urlLen: imageUrl.length })
   }
+  return imageUrl
+},
+
+// AI 识别公共流程：统一取模型 → 图床取图 → 调宿主 ztools.ai 视觉对话 → 返回文本。
+// promptKey: AI_VISION_PROMPTS 的 key（text / latex / table）；tag 用于日志前缀。
+async _aiVisionRecognize(image, promptKey, userText, tag, emptyError) {
+  const { model } = this.getOcrSettings('ai-ocr')
+  if (!model) throw new Error('AI 识别未选择模型，请在「渠道」页「AI 识别」中选择支持视觉的模型')
+  if (!image) throw new Error('AI 识别未提供图片')
+  console.debug('[' + tag + '] start', { model, prompt: promptKey, src: image.slice(0, 24) + (image.length > 24 ? '…(' + image.length + ')' : '') })
+  const imageUrl = await this._aiVisionImageUrl(image, tag)
   const t0 = Date.now()
   const res = await window.ztools.ai({
     model,
     messages: [
-      { role: 'system', content: systemPrompt || '识别图片中的所有文字，只输出识别到的文字。' },
+      { role: 'system', content: AI_VISION_PROMPTS[promptKey] },
       {
         role: 'user',
         content: [
-          { type: 'text', text: lang ? `请识别这张图片中的文字（语言：${lang}）。` : '请识别这张图片中的所有文字。' },
+          { type: 'text', text: userText },
           { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } }
         ]
       }
     ]
   })
   const out = (res && res.content ? String(res.content) : '').trim()
-  console.debug('[ai-ocr] ai done', { ms: Date.now() - t0, contentLen: out.length })
-  if (!out) throw new Error('AI 识图返回为空，请确认所选模型支持视觉输入')
+  console.debug('[' + tag + '] ai done', { ms: Date.now() - t0, contentLen: out.length })
+  if (!out) throw new Error(emptyError)
+  return out
+},
+
+// AI 识图：input { image, lang? } -> { text, blocks?, confidence? }
+// image 可为 本地路径 / data URI / http(s) URL；必须选择支持视觉的模型，
+// 宿主不识别「视觉模型」概念，纯文本模型会由远端报错透传。
+async ocrAi(image, lang) {
+  const out = await this._aiVisionRecognize(
+    image,
+    'text',
+    lang ? `请识别这张图片中的文字（语言：${lang}）。` : '请识别这张图片中的所有文字。',
+    'ai-ocr',
+    'AI 识图返回为空，请确认所选模型支持视觉输入'
+  )
   return { text: out }
 },
 
 // AI 公式识别：input { image } -> { latex }
-// 复用宿主 AI 视觉模型（与 ocrAi 同机制），但走独立的 ai-latex-ocr 配置块
-// （独立 model + systemPrompt，prompt 要求输出 LaTeX 源码）。
-// image 可为 本地路径 / data URI / http(s) URL：本地路径经 readFileAsDataURL 转 data URI 后传入。
+// 与 ocrAi 共用统一视觉模型，提示词内置（要求输出 LaTeX 源码）。
 // 防御性剔除 AI 可能误加的 markdown 代码块围栏与 $/$$ 包裹，保证 KaTeX 可直接渲染。
 async latexAi(image) {
-  const { model, systemPrompt } = this.getOcrSettings('ai-latex-ocr')
-  if (!model) throw new Error('AI 公式识别未选择模型，请在「翻译/OCR 提供商」设置页选择支持视觉的模型')
-  if (!image) throw new Error('AI 公式识别未提供图片')
-  console.debug('[ai-latex] start', { model, src: image.slice(0, 24) + (image.length > 24 ? '…(' + image.length + ')' : '') })
-  // 先走图床（开启时）拿可访问 URL；关闭/失败回退本地路径转 data URI（与 ocrAi 一致）。
-  let imageUrl = await this.uploadImage(image)
-  if (!imageUrl) {
-    if (!/^https?:\/\//i.test(image) && !/^data:/i.test(image)) {
-      imageUrl = this.readFileAsDataURL(image)
-      console.debug('[ai-latex] image-host miss → local-path data URI', { dataUriLen: imageUrl.length })
-    } else {
-      imageUrl = image
-      console.debug('[ai-latex] image-host miss → input passthrough', { kind: /^data:/i.test(image) ? 'data-uri' : 'http' })
-    }
-  } else {
-    console.debug('[ai-latex] image-host hit', { urlLen: imageUrl.length })
-  }
-  const t0 = Date.now()
-  const res = await window.ztools.ai({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt || '识别图片中的数学公式并输出对应的 LaTeX 源码。只输出 LaTeX 代码，不要用 $ 或 $$ 包裹，不要解释或附加说明。' },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: '请识别这张图片中的数学公式并输出 LaTeX 源码。' },
-          { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } }
-        ]
-      }
-    ]
-  })
-  let out = (res && res.content ? String(res.content) : '').trim()
-  console.debug('[ai-latex] ai done', { ms: Date.now() - t0, contentLen: out.length })
-  if (!out) throw new Error('AI 公式识别返回为空，请确认所选模型支持视觉输入')
-  const before = out.length
-  out = this._stripLatexFencing(out)
-  console.debug('[ai-latex] stripped fencing', { before, after: out.length })
-  return { latex: out }
+  const out = await this._aiVisionRecognize(
+    image,
+    'latex',
+    '请识别这张图片中的数学公式并输出 LaTeX 源码。',
+    'ai-latex',
+    'AI 公式识别返回为空，请确认所选模型支持视觉输入'
+  )
+  const latex = this._stripLatexFencing(out)
+  console.debug('[ai-latex] stripped fencing', { before: out.length, after: latex.length })
+  return { latex }
 },
 
-// 剔除 AI 输出常见的 markdown 代码块围栏与 $/$$ 包裹，得到纯净 LaTeX 源码。
-// 处理：```latex\n...\n``` / ```\n...\n``` 围栏；首尾的 $$...$$ / $...$ 包裹。
-_stripLatexFencing(s) {
+// AI 表格识别：input { image } -> { table }（Markdown 表格源码）
+// 与 ocrAi 共用统一视觉模型，提示词内置（要求输出 Markdown 表格）。
+// 剔除 AI 可能误加的 markdown 代码块围栏，便于直接解析渲染。
+async tableAi(image) {
+  const out = await this._aiVisionRecognize(
+    image,
+    'table',
+    '请识别这张图片中的表格并输出 Markdown 表格。',
+    'ai-table',
+    'AI 表格识别返回为空，请确认所选模型支持视觉输入'
+  )
+  return { table: this._stripCodeFence(out) }
+},
+
+// 剔除 AI 输出常见的 markdown 代码块围栏（```lang\n...\n``` / ```\n...\n```）。
+_stripCodeFence(s) {
   let t = String(s || '').trim()
-  // ```lang\n...\n``` 或 ```\n...\n```
   const fence = t.match(/^```[a-zA-Z]*\s*\n([\s\S]*?)\n```$/)
   if (fence) t = fence[1].trim()
+  return t
+},
+
+// 剔除 AI 输出的代码块围栏与 $/$$ 包裹，得到纯净 LaTeX 源码。
+_stripLatexFencing(s) {
+  let t = this._stripCodeFence(s)
   // 首尾 $$...$$
   if (t.startsWith('$$') && t.endsWith('$$')) t = t.slice(2, -2).trim()
   // 首尾 $...$（避免误伤 $ 内部含 $ 的情形：仅当首尾各恰好一个 $ 时剥离）

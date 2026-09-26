@@ -6,6 +6,12 @@ import 'katex/dist/katex.min.css'
 import OcrImageViewer from './OcrImageViewer.vue'
 import { useSegmentIndicator } from '../composables/useSegmentIndicator'
 import { useHistory } from '../composables/useHistory'
+import {
+  markdownTableToHtml,
+  markdownTableToTsv,
+  parseMarkdownTable,
+  type ParsedMarkdownTable
+} from '../utils/markdownTable'
 
 const { historyList, removeHistory } = useHistory()
 const { success } = useToast()
@@ -17,9 +23,14 @@ const { isDark } = useColorScheme()
 type HistoryTab = 'ocr' | 'translate'
 const historyMode = ref<HistoryTab>('ocr')
 
-// 文字 / 公式两种 OCR 都归到「OCR」分类（缩略列表内部天然区分），「翻译」单独一类。
+// 文字 / 公式 / 表格三种 OCR 都归到「OCR」分类（缩略列表内部天然区分），「翻译」单独一类。
 function matchesTab(item: HistoryItem, tab: HistoryTab): boolean {
-  if (tab === 'ocr') return item.kind === 'ocr-text' || item.kind === 'ocr-formula'
+  if (tab === 'ocr')
+    return (
+      item.kind === 'ocr-text' ||
+      item.kind === 'ocr-formula' ||
+      item.kind === 'ocr-table'
+    )
   return item.kind === 'translate'
 }
 
@@ -59,6 +70,12 @@ const activeOcrText = computed(
 const activeOcrFormula = computed(
   () => (activeItem.value?.kind === 'ocr-formula' ? activeItem.value : null) as
     | (HistoryItem & { kind: 'ocr-formula'; payload: { kind: 'ocr-formula'; imageSrc: string; latex: string } })
+    | null
+)
+/** 类型收敛后的当前 OCR 表格记录。 */
+const activeOcrTable = computed(
+  () => (activeItem.value?.kind === 'ocr-table' ? activeItem.value : null) as
+    | (HistoryItem & { kind: 'ocr-table'; payload: { kind: 'ocr-table'; imageSrc: string; markdown: string } })
     | null
 )
 /** 类型收敛后的当前翻译记录。 */
@@ -134,7 +151,11 @@ function onThumbClick(item: HistoryItem) {
   // 翻译记录无全屏预览，缩小为「选中行」语义
   selectRow(item)
   // OCR 记录：等下一帧 viewer 挂载到位再触发全屏（若尚未挂载）
-  if (item.kind === 'ocr-text' || item.kind === 'ocr-formula') {
+  if (
+    item.kind === 'ocr-text' ||
+    item.kind === 'ocr-formula' ||
+    item.kind === 'ocr-table'
+  ) {
     selectRow(item)
     // 若当前查看的不是这条，先选中，下一帧再开全屏
     if (activeItem.value?.id !== item.id) {
@@ -185,6 +206,37 @@ function copyLatex(kind: 'raw' | 'inline' | 'display') {
       : kind === 'inline'
         ? '已复制 $…$ 形式'
         : '已复制 $$…$$ 形式'
+  )
+}
+
+// ─── 详情面板：表格渲染（表格记录） ──────────────────────────────────
+const parsedTable = computed<ParsedMarkdownTable | null>(() => {
+  const item = activeOcrTable.value
+  if (!item) return null
+  return parseMarkdownTable(item.payload.markdown)
+})
+
+/** 表格列对齐样式（来自 Markdown 分隔行的 :---: 标记，未标注用默认左对齐）。 */
+function tableAlignStyle(i: number): Record<string, string> {
+  const a = parsedTable.value?.aligns[i]
+  return a ? { textAlign: a } : {}
+}
+
+/** 复制表格：Markdown 源码 / TSV（粘贴进 Excel 等表格软件）/ HTML。 */
+function copyTable(kind: 'markdown' | 'tsv' | 'html') {
+  const item = activeOcrTable.value
+  if (!item || !item.payload.markdown) return
+  let text = item.payload.markdown
+  if (kind === 'tsv') text = markdownTableToTsv(item.payload.markdown)
+  else if (kind === 'html') text = markdownTableToHtml(item.payload.markdown)
+  if (!text) return
+  window.ztools.copyText(text)
+  success(
+    kind === 'markdown'
+      ? '已复制 Markdown'
+      : kind === 'tsv'
+        ? '已复制 TSV，可粘贴进表格软件'
+        : '已复制 HTML'
   )
 }
 
@@ -295,7 +347,11 @@ function removeItem(id: string, e: MouseEvent) {
             <!-- 缩略图：固定大小容器，contain -->
             <div class="thumb" @click.stop="onThumbClick(item)">
               <img
-                v-if="item.kind === 'ocr-text' || item.kind === 'ocr-formula'"
+                v-if="
+                  item.kind === 'ocr-text' ||
+                  item.kind === 'ocr-formula' ||
+                  item.kind === 'ocr-table'
+                "
                 :src="item.thumbnail"
                 :alt="item.title"
                 class="thumb-img"
@@ -384,6 +440,42 @@ function removeItem(id: string, e: MouseEvent) {
           </div>
         </div>
 
+        <!-- ocr-table：表格预览 + 三种格式复制 -->
+        <div v-else-if="activeOcrTable" class="table-layout" :class="{ dark: isDark }">
+          <!-- 表格预览 -->
+          <div class="result-section table-half">
+            <div class="section-title">表格预览</div>
+            <div class="table-preview">
+              <table v-if="parsedTable" class="md-table">
+                <thead>
+                  <tr>
+                    <th
+                      v-for="(h, i) in parsedTable.headers"
+                      :key="'h' + i"
+                      :style="tableAlignStyle(i)"
+                    >
+                      {{ h }}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(r, ri) in parsedTable.rows" :key="'r' + ri">
+                    <td v-for="(c, ci) in r" :key="ci" :style="tableAlignStyle(ci)">
+                      {{ c }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="table-fallback">该记录暂无法解析为表格</div>
+            </div>
+          </div>
+          <div class="copy-actions">
+            <ZButton @click="copyTable('markdown')">复制 Markdown</ZButton>
+            <ZButton @click="copyTable('tsv')">复制 TSV</ZButton>
+            <ZButton @click="copyTable('html')">复制 HTML</ZButton>
+          </div>
+        </div>
+
         <!-- translate：上下结构，原文 + 译文 -->
         <div v-else-if="activeTranslate" class="translate-layout">
           <!-- 顶部小头：provider + 语言方向 -->
@@ -429,7 +521,8 @@ function removeItem(id: string, e: MouseEvent) {
   display: flex;
   gap: 14px;
   min-height: 0;
-  padding: 14px;
+  /* 底部留白由 SettingLayout 内容区统一预留，这里不再重复 */
+  padding: 14px 14px 0;
 }
 
 /* 左：分类切换 + 缩略列表 */
@@ -741,13 +834,79 @@ function removeItem(id: string, e: MouseEvent) {
   border-color: var(--border-color, #374151);
 }
 
+/* 表格详情：预览区独占撑满 */
+.table-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.table-half {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.table-preview {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: 8px;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #e5e6eb);
+  overflow: auto;
+}
+
+/* scoped 下 :global 失效，用 .dark 类驱动暗色表格预览 */
+.table-layout.dark .table-preview {
+  background: var(--code-bg, #2a2a2a);
+  border-color: var(--border-color, #374151);
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border-color, #e5e6eb);
+  padding: 6px 10px;
+  text-align: left;
+  word-break: break-all;
+}
+
+.md-table th {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.04));
+  font-weight: 600;
+}
+
+.table-layout.dark .md-table th {
+  background: var(--hover-bg, rgba(255, 255, 255, 0.06));
+}
+
+/* 源码解析不出表格结构时的占位提示 */
+.table-fallback {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--text-secondary, #999);
+  text-align: center;
+}
+
 .copy-actions {
   display: flex;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
   flex-shrink: 0;
-  margin-bottom: 28px;
 }
 
 /* 翻译详情：上下结构 */
